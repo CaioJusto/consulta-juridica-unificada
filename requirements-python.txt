@@ -4,3 +4,4 @@ playwright>=1.58
 fastapi>=0.100
 uvicorn>=0.20
 lxml>=5.0
+openpyxl>=3.1
