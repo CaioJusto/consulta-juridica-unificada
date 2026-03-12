@@ -44,7 +44,7 @@ import {
   Play,
   Square,
   Download,
-  Infinity,
+  Infinity as InfinityIcon,
 } from "lucide-react";
 import type {
   TribunalOption,
@@ -153,9 +153,24 @@ function useSgtSearch(kind: string) {
 // ─── Main Component ─────────────────────────────────────────────
 
 export function ConsultaGeral() {
+  // UF → tribunal quick-select mapping (state courts)
+  const UF_TRIBUNAL_MAP: Record<string, string> = {
+    AC: "api_publica_tjac", AL: "api_publica_tjal", AM: "api_publica_tjam",
+    AP: "api_publica_tjap", BA: "api_publica_tjba", CE: "api_publica_tjce",
+    DF: "api_publica_tjdft", ES: "api_publica_tjes", GO: "api_publica_tjgo",
+    MA: "api_publica_tjma", MG: "api_publica_tjmg", MS: "api_publica_tjms",
+    MT: "api_publica_tjmt", PA: "api_publica_tjpa", PB: "api_publica_tjpb",
+    PE: "api_publica_tjpe", PI: "api_publica_tjpi", PR: "api_publica_tjpr",
+    RJ: "api_publica_tjrj", RN: "api_publica_tjrn", RO: "api_publica_tjro",
+    RR: "api_publica_tjrr", RS: "api_publica_tjrs", SC: "api_publica_tjsc",
+    SE: "api_publica_tjse", SP: "api_publica_tjsp", TO: "api_publica_tjto",
+  };
+  const UF_LIST = Object.keys(UF_TRIBUNAL_MAP).sort();
+
   // Basic filters
   const [tribunais, setTribunais] = useState<TribunalOption[]>([]);
   const [tribunal, setTribunal] = useState("api_publica_trf1");
+  const [ufSelect, setUfSelect] = useState(""); // quick-select UF → auto-sets tribunal
   const [numero, setNumero] = useState("");
   const [grau, setGrau] = useState("");
 
@@ -378,17 +393,43 @@ export function ConsultaGeral() {
   function handleExportCSV() {
     const data = showCollected ? allCollectedProcessos : state.processos;
     if (data.length === 0) return;
-    const headers = ["numero_processo", "classe", "orgao_julgador", "data_ajuizamento", "grau", "assuntos", "qtd_movimentos"];
-    const rows = data.map(p => [
-      formatCNJ(p.numero_processo),
-      p.classe,
-      p.orgao_julgador,
-      formatDate(p.data_ajuizamento),
-      p.grau || "",
-      p.assuntos.map(a => a.nome).join("; "),
-      String(p.movimentos.length),
-    ]);
-    const csv = [headers.join(","), ...rows.map(r => r.map(c => `"${(c || "").replace(/"/g, '""')}"`).join(","))].join("\n");
+    const headers = [
+      "numero_processo",
+      "classe",
+      "orgao_julgador",
+      "data_ajuizamento",
+      "grau",
+      "assuntos",
+      "qtd_movimentos",
+      "ultima_movimentacao_data",
+      "ultima_movimentacao_nome",
+      "tribunal",
+      "fonte",
+    ];
+    const rows = data.map(p => {
+      // Sort movements descending and take the most recent
+      const sorted = [...p.movimentos].sort((a, b) =>
+        (b.data_hora || "").localeCompare(a.data_hora || "")
+      );
+      const lastMov = sorted[0];
+      return [
+        formatCNJ(p.numero_processo),
+        p.classe,
+        p.orgao_julgador,
+        formatDate(p.data_ajuizamento),
+        p.grau || "",
+        p.assuntos.map(a => a.nome).join("; "),
+        String(p.movimentos.length),
+        lastMov ? formatDate(lastMov.data_hora) : "",
+        lastMov ? lastMov.nome : "",
+        p.tribunal || "",
+        "DataJud (CNJ)",
+      ];
+    });
+    const csv = [
+      headers.join(","),
+      ...rows.map(r => r.map(c => `"${(c || "").replace(/"/g, '""')}"`).join(",")),
+    ].join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -631,12 +672,12 @@ export function ConsultaGeral() {
               </div>
             </div>
 
-            {/* Row 2: Órgão Julgador + Grau */}
+            {/* Row 2: Órgão Julgador + Grau + UF */}
             <div className="space-y-3">
               <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                <Building2 className="w-3 h-3" /> Órgão Julgador · Grau
+                <Building2 className="w-3 h-3" /> Órgão Julgador · Grau · UF
               </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {/* Órgão Julgador */}
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium text-muted-foreground">Órgão Julgador</Label>
@@ -683,10 +724,32 @@ export function ConsultaGeral() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">Todos</SelectItem>
-                      <SelectItem value="G1">1º Grau</SelectItem>
-                      <SelectItem value="G2">2º Grau</SelectItem>
+                      <SelectItem value="G1">1ª Instância</SelectItem>
+                      <SelectItem value="G2">2ª Instância</SelectItem>
                       <SelectItem value="JE">Juizado Especial</SelectItem>
                       <SelectItem value="TR">Turma Recursal</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {/* UF Quick-Select (selects TJ estadual) */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">
+                    UF (seleção rápida TJ)
+                  </Label>
+                  <Select
+                    value={ufSelect}
+                    onValueChange={(uf) => {
+                      setUfSelect(uf);
+                      if (uf && UF_TRIBUNAL_MAP[uf]) setTribunal(UF_TRIBUNAL_MAP[uf]);
+                    }}
+                  >
+                    <SelectTrigger className="h-8 text-xs" data-testid="select-uf">
+                      <SelectValue placeholder="Selecionar UF..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {UF_LIST.map((uf) => (
+                        <SelectItem key={uf} value={uf}>{uf}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -1041,6 +1104,7 @@ export function ConsultaGeral() {
     if (movimentoCodigo) count++;
     if (orgaoJulgadorCodigo) count++;
     if (grau && grau !== "all") count++;
+    if (ufSelect) count++;
     if (dataInicio || dataFim) count++;
     if (dataAtualizacaoInicio || dataAtualizacaoFim) count++;
     if (temAssuntos !== "any") count++;
