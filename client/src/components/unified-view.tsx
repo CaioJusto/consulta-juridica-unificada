@@ -107,60 +107,41 @@ export function UnifiedView() {
     const digits = num.replace(/\D/g, "");
     const formatted = formatCNJ(num);
 
-    // All 3 searches in parallel
-    const [djRes, p1Res, pubRes] = await Promise.allSettled([
-      // DataJud: search by process number
-      apiRequest("POST", "/api/datajud/buscar", {
-        tribunal_alias: "api_publica_trf1",
-        numero_processo: num,
-        page_size: 1,
+    // Each source updates state independently as soon as it resolves
+    const fetchDatajud = apiRequest("POST", "/api/datajud/buscar", {
+      tribunal_alias: "api_publica_trf1",
+      numero_processo: num,
+      page_size: 1,
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        const data = json.success && json.data?.processos?.length > 0
+          ? json.data.processos[0] as DataJudProcesso : null;
+        const error = data ? "" : json.error || "Não encontrado no DataJud";
+        setResults((prev) => ({ ...prev, datajud: { loading: false, data, error } }));
       })
-        .then((r) => r.json())
-        .then((json) => {
-          if (json.success && json.data?.processos?.length > 0) {
-            return { data: json.data.processos[0] as DataJudProcesso, error: "" };
-          }
-          return { data: null, error: json.error || "Não encontrado no DataJud" };
-        }),
+      .catch(() => setResults((prev) => ({ ...prev, datajud: { loading: false, data: null, error: "Erro ao consultar DataJud" } })));
 
-      // TRF1 Processual
-      apiRequest("GET", `/api/processo?numero=${encodeURIComponent(digits)}&secao=TRF1`)
-        .then((r) => r.json())
-        .then((json) => {
-          if (json.success && json.data) {
-            return { data: json.data as Processo, error: "" };
-          }
-          return { data: null, error: json.error || "Não encontrado no TRF1 Processual" };
-        }),
+    const fetchProcessual = apiRequest("GET", `/api/processo?numero=${encodeURIComponent(digits)}&secao=TRF1`)
+      .then((r) => r.json())
+      .then((json) => {
+        const data = json.success && json.data ? json.data as Processo : null;
+        const error = data ? "" : json.error || "Não encontrado no TRF1 Processual";
+        setResults((prev) => ({ ...prev, processual: { loading: false, data, error } }));
+      })
+      .catch(() => setResults((prev) => ({ ...prev, processual: { loading: false, data: null, error: "Erro ao consultar TRF1 Processual" } })));
 
-      // TRF1 Público
-      apiRequest("GET", `/api/trf1publico/buscar?numero=${encodeURIComponent(formatted)}`)
-        .then((r) => r.json())
-        .then((json) => {
-          if (json.success && json.data?.processos?.length > 0) {
-            return { data: json.data.processos[0] as TRF1PublicProcess, error: "" };
-          }
-          return { data: null, error: json.error || "Não encontrado na Consulta Pública PJe" };
-        }),
-    ]);
+    const fetchPublico = apiRequest("GET", `/api/trf1publico/buscar?numero=${encodeURIComponent(formatted)}`)
+      .then((r) => r.json())
+      .then((json) => {
+        const data = json.success && json.data?.processos?.length > 0
+          ? json.data.processos[0] as TRF1PublicProcess : null;
+        const error = data ? "" : json.error || "Não encontrado na Consulta Pública PJe";
+        setResults((prev) => ({ ...prev, publico: { loading: false, data, error } }));
+      })
+      .catch(() => setResults((prev) => ({ ...prev, publico: { loading: false, data: null, error: "Erro ao consultar TRF1 Público" } })));
 
-    setResults({
-      datajud: {
-        loading: false,
-        data: djRes.status === "fulfilled" ? djRes.value.data : null,
-        error: djRes.status === "fulfilled" ? djRes.value.error : "Erro ao consultar DataJud",
-      },
-      processual: {
-        loading: false,
-        data: p1Res.status === "fulfilled" ? p1Res.value.data : null,
-        error: p1Res.status === "fulfilled" ? p1Res.value.error : "Erro ao consultar TRF1 Processual",
-      },
-      publico: {
-        loading: false,
-        data: pubRes.status === "fulfilled" ? pubRes.value.data : null,
-        error: pubRes.status === "fulfilled" ? pubRes.value.error : "Erro ao consultar TRF1 Público",
-      },
-    });
+    await Promise.allSettled([fetchDatajud, fetchProcessual, fetchPublico]);
   }
 
   const fontes = [
