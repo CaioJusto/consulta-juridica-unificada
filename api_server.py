@@ -11,6 +11,8 @@ import json
 import re
 import html as html_mod
 import xml.etree.ElementTree as ET
+import threading
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -741,6 +743,403 @@ def trf1_publico_buscar(
         }
     except Exception as e:
         return {"success": False, "error": f"Erro na consulta pública: {str(e)}"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Pipeline server-side (background jobs)
+# ═══════════════════════════════════════════════════════════════
+
+jobs: dict[str, dict] = {}  # job_id -> job state
+
+
+def _run_pipeline(job_id: str) -> None:
+    """Background thread that executes the full pipeline (DataJud + enrichments)."""
+    import time
+
+    job = jobs.get(job_id)
+    if not job:
+        return
+
+    config = job["config"]
+
+    try:
+        tribunal_alias = (config.get("tribunal_alias") or "api_publica_trf1").strip()
+        limit_raw = config.get("limit", "1000")
+        limit_num = float("inf") if limit_raw == "all" else int(limit_raw or 1000)
+        page_size = min(200, int(limit_num) if limit_num != float("inf") else 200)
+
+        sort_field = config.get("sort_field", "dataHoraUltimaAtualizacao")
+        sort_order = config.get("sort_order", "desc")
+
+        # Build base search body
+        must: list[dict] = []
+        filters: list[dict] = []
+        must_not: list[dict] = []
+
+        numero = (config.get("numero_processo") or "").strip()
+        if numero:
+            numero_limpo = re.sub(r"[.\-/\s]", "", numero)
+            must.append({"match": {"numeroProcesso": numero_limpo}})
+
+        if config.get("classe_codigo"):
+            must.append({"match": {"classe.codigo": int(config["classe_codigo"])}})
+
+        assuntos_codigos = config.get("assuntos_codigos") or []
+        for code in assuntos_codigos:
+            must.append({"match": {"assuntos.codigo": int(code)}})
+
+        for code in (config.get("assuntos_excluir_codigos") or []):
+            must_not.append({"match": {"assuntos.codigo": int(code)}})
+
+        if config.get("movimento_codigo"):
+            must.append({"match": {"movimentos.codigo": int(config["movimento_codigo"])}})
+
+        if config.get("orgao_julgador_codigo"):
+            must.append({"match": {"orgaoJulgador.codigo": int(config["orgao_julgador_codigo"])}})
+
+        if config.get("grau"):
+            must.append({"match": {"grau": config["grau"]}})
+
+        if config.get("nivel_sigilo") is not None and config["nivel_sigilo"] != "":
+            must.append({"match": {"nivelSigilo": int(config["nivel_sigilo"])}})
+
+        tem_assuntos = config.get("tem_assuntos")
+        if tem_assuntos is True:
+            filters.append({"exists": {"field": "assuntos"}})
+        elif tem_assuntos is False:
+            must_not.append({"exists": {"field": "assuntos"}})
+
+        tem_movimentos = config.get("tem_movimentos")
+        if tem_movimentos is True:
+            filters.append({"exists": {"field": "movimentos"}})
+        elif tem_movimentos is False:
+            must_not.append({"exists": {"field": "movimentos"}})
+
+        min_mov = config.get("min_movimentos")
+        max_mov = config.get("max_movimentos")
+        if min_mov is not None or max_mov is not None:
+            script_parts = []
+            params: dict = {}
+            if min_mov is not None:
+                script_parts.append("doc['movimentos.codigo'].size() >= params.minMov")
+                params["minMov"] = int(min_mov)
+            if max_mov is not None:
+                script_parts.append("doc['movimentos.codigo'].size() <= params.maxMov")
+                params["maxMov"] = int(max_mov)
+            filters.append({"script": {"script": {"source": " && ".join(script_parts), "params": params}}})
+
+        date_range: dict = {}
+        if config.get("data_ajuizamento_inicio"):
+            date_range["gte"] = config["data_ajuizamento_inicio"]
+        if config.get("data_ajuizamento_fim"):
+            date_range["lte"] = config["data_ajuizamento_fim"]
+        if date_range:
+            filters.append({"range": {"dataAjuizamento": date_range}})
+
+        upd_range: dict = {}
+        if config.get("data_atualizacao_inicio"):
+            upd_range["gte"] = config["data_atualizacao_inicio"]
+        if config.get("data_atualizacao_fim"):
+            upd_range["lte"] = config["data_atualizacao_fim"]
+        if upd_range:
+            filters.append({"range": {"dataHoraUltimaAtualizacao": upd_range}})
+
+        bool_query: dict[str, Any] = {}
+        if must:
+            bool_query["must"] = must
+        if filters:
+            bool_query["filter"] = filters
+        if must_not:
+            bool_query["must_not"] = must_not
+        if not bool_query:
+            bool_query["must"] = [{"match_all": {}}]
+
+        # ── Stage 1: DataJud paginated collection ────────────────
+
+        job["progress"]["stage"] = "collecting"
+        search_after = None
+        total_collected = 0
+        first_page = True
+        collected_rows: list[dict] = []
+
+        while True:
+            status = job["status"]
+            if status == "stopped":
+                return
+            if status == "paused":
+                time.sleep(0.5)
+                continue
+
+            body: dict[str, Any] = {
+                "size": page_size,
+                "query": {"bool": bool_query},
+                "sort": [{sort_field: {"order": sort_order}}],
+            }
+            if search_after:
+                body["search_after"] = search_after
+
+            raw = _datajud_search(tribunal_alias, body)
+            total_hits = raw.get("hits", {}).get("total", {}).get("value", 0)
+            processos = _parse_datajud_hits(raw, tribunal_alias)
+            hits = raw.get("hits", {}).get("hits", [])
+            next_sa = hits[-1].get("sort") if hits else None
+
+            if first_page:
+                first_page = False
+                effective_total = min(total_hits, int(limit_num)) if limit_num != float("inf") else total_hits
+                job["progress"]["total_datajud"] = effective_total
+
+            if not processos:
+                break
+
+            for p in processos:
+                # Build row dict with all fields
+                assuntos_str = "; ".join(a.get("nome", "") for a in p.get("assuntos", []))
+                movimentos = p.get("movimentos", [])
+                ultima_mov = movimentos[0] if movimentos else {}
+                primeira_mov = movimentos[-1] if movimentos else {}
+
+                row = {
+                    "numero_processo": p.get("numero_processo", ""),
+                    "tribunal": p.get("tribunal", ""),
+                    "classe": p.get("classe", ""),
+                    "orgao_julgador": p.get("orgao_julgador", ""),
+                    "grau": p.get("grau", ""),
+                    "data_ajuizamento": p.get("data_ajuizamento", ""),
+                    "ultima_atualizacao": p.get("ultima_atualizacao", ""),
+                    "assuntos": assuntos_str,
+                    "qtd_movimentos": len(movimentos),
+                    "ultima_movimentacao": f"{ultima_mov.get('data_hora', '')} {ultima_mov.get('nome', '')}".strip(),
+                    # TRF1 Processual fields (populated later)
+                    "polo_ativo_nome": "",
+                    "polo_ativo_cpf": "",
+                    "polo_passivo_nome": "",
+                    "polo_passivo_cnpj": "",
+                    "advogados": "",
+                    "situacao_processual": "",
+                    # TRF1 Público fields (populated later)
+                    "valor_causa": "",
+                    "situacao_pje": "",
+                    "orgao_julgador_pje": "",
+                }
+                collected_rows.append(row)
+                job["rows"].append(row)
+                total_collected += 1
+                job["progress"]["collected"] = total_collected
+
+                if limit_num != float("inf") and total_collected >= int(limit_num):
+                    break
+
+            if limit_num != float("inf") and total_collected >= int(limit_num):
+                break
+            if not next_sa or len(processos) < page_size:
+                break
+            search_after = next_sa
+
+        if job["status"] == "stopped":
+            return
+
+        # ── Stage 2: TRF1 Processual enrichment ─────────────────
+
+        enrich_processual = config.get("enrich_processual", False)
+        enrich_publico = config.get("enrich_publico", False)
+
+        if enrich_processual:
+            job["progress"]["stage"] = "enriching"
+            batch_size = int(config.get("batch_size", 8))
+
+            for i, row in enumerate(collected_rows):
+                if job["status"] == "stopped":
+                    return
+                while job["status"] == "paused":
+                    time.sleep(0.5)
+
+                try:
+                    digits = re.sub(r"\D", "", row["numero_processo"])
+                    client = TRF1Client(secao="TRF1", timeout=50)
+                    proc = client.buscar_por_numero(digits)
+
+                    if proc:
+                        advogados = [p for p in proc.partes if p.oab]
+                        partes = [p for p in proc.partes if not p.oab]
+                        polo_ativo = [p for p in partes if "ATIVO" in (p.tipo or "").upper() or "ATIVO" in (p.caracteristica or "").upper()]
+                        polo_passivo = [p for p in partes if "PASSIVO" in (p.tipo or "").upper() or "PASSIVO" in (p.caracteristica or "").upper()]
+                        ativos = polo_ativo if polo_ativo else partes[:max(1, len(partes) // 2)]
+                        passivos = polo_passivo if polo_passivo else partes[max(1, len(partes) // 2):]
+
+                        row["polo_ativo_nome"] = "; ".join(p.nome for p in ativos[:3] if p.nome)
+                        row["polo_ativo_cpf"] = next((p.entidade for p in ativos if p.entidade), "")
+                        row["polo_passivo_nome"] = "; ".join(p.nome for p in passivos[:3] if p.nome)
+                        row["polo_passivo_cnpj"] = next((p.entidade for p in passivos if p.entidade), "")
+                        row["advogados"] = "; ".join(
+                            f"{p.nome} (OAB: {p.oab})" if p.oab else p.nome
+                            for p in advogados[:4] if p.nome
+                        )
+                        row["situacao_processual"] = proc.situacao or ""
+                except Exception:
+                    job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
+
+                job["progress"]["enriched_processual"] = i + 1
+                # Rate limiting for batched requests
+                if (i + 1) % batch_size == 0:
+                    time.sleep(0.2)
+
+        if job["status"] == "stopped":
+            return
+
+        # ── Stage 3: TRF1 Público enrichment ─────────────────────
+
+        if enrich_publico:
+            job["progress"]["stage"] = "enriching"
+            batch_size = max(1, int(config.get("batch_size", 8)) // 2)
+
+            try:
+                from datajud_app.trf1_public import TRF1PublicSearchParams, search_trf1_public_bundle
+                publico_available = True
+            except ImportError:
+                publico_available = False
+
+            if publico_available:
+                for i, row in enumerate(collected_rows):
+                    if job["status"] == "stopped":
+                        return
+                    while job["status"] == "paused":
+                        time.sleep(0.5)
+
+                    try:
+                        # Format number CNJ style
+                        digits = re.sub(r"\D", "", row["numero_processo"])
+                        m = re.match(r"^(\d{7})(\d{2})(\d{4})(\d{1})(\d{2})(\d{4})$", digits)
+                        formatted = f"{m.group(1)}-{m.group(2)}.{m.group(3)}.{m.group(4)}.{m.group(5)}.{m.group(6)}" if m else row["numero_processo"]
+
+                        params = TRF1PublicSearchParams(
+                            process_number=formatted,
+                            party_name="",
+                            document_number="",
+                            lawyer_name="",
+                            oab_number="",
+                            oab_state="",
+                        )
+                        bundle = search_trf1_public_bundle(params, max_details=1)
+                        if bundle.process_rows:
+                            pub = bundle.process_rows[0]
+                            row["valor_causa"] = pub.get("valor_causa", "")
+                            row["situacao_pje"] = pub.get("situacao", "")
+                            row["orgao_julgador_pje"] = pub.get("orgao_julgador", "")
+                    except Exception:
+                        job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
+
+                    job["progress"]["enriched_publico"] = i + 1
+                    if (i + 1) % batch_size == 0:
+                        time.sleep(0.5)
+
+        job["status"] = "done"
+        job["progress"]["stage"] = "done"
+
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
+@app.post("/api/pipeline/start")
+def pipeline_start(payload: dict = Body(...)):
+    """Start a pipeline job. Returns job_id immediately."""
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "id": job_id,
+        "status": "running",
+        "created_at": datetime.utcnow().isoformat(),
+        "config": payload,
+        "progress": {
+            "stage": "collecting",
+            "collected": 0,
+            "total_datajud": 0,
+            "enriched_processual": 0,
+            "enriched_publico": 0,
+            "errors": 0,
+        },
+        "rows": [],
+        "error": None,
+    }
+    t = threading.Thread(target=_run_pipeline, args=(job_id,), daemon=True)
+    t.start()
+    return {"success": True, "job_id": job_id}
+
+
+@app.get("/api/pipeline/status/{job_id}")
+def pipeline_status(job_id: str):
+    """Poll job status and progress."""
+    job = jobs.get(job_id)
+    if not job:
+        return {"success": False, "error": "Job not found"}
+    return {
+        "success": True,
+        "data": {
+            "status": job["status"],
+            "progress": job["progress"],
+            "row_count": len(job["rows"]),
+            "preview_rows": job["rows"][-20:] if job["rows"] else [],
+            "error": job.get("error"),
+        }
+    }
+
+
+@app.post("/api/pipeline/control/{job_id}")
+def pipeline_control(job_id: str, payload: dict = Body(...)):
+    """Pause, resume, or stop a job."""
+    job = jobs.get(job_id)
+    if not job:
+        return {"success": False, "error": "Job not found"}
+    action = payload.get("action")
+    if action == "pause":
+        job["status"] = "paused"
+    elif action == "resume":
+        job["status"] = "running"
+    elif action == "stop":
+        job["status"] = "stopped"
+    return {"success": True}
+
+
+@app.get("/api/pipeline/export/{job_id}")
+def pipeline_export(job_id: str):
+    """Export all collected rows as CSV."""
+    from fastapi.responses import StreamingResponse
+    import io
+    import csv as csv_mod
+
+    job = jobs.get(job_id)
+    if not job or not job["rows"]:
+        return {"success": False, "error": "No data"}
+
+    rows = job["rows"]
+    output = io.StringIO()
+    writer = csv_mod.DictWriter(output, fieldnames=rows[0].keys(), extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8-sig")),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=pipeline_{job_id[:8]}.csv"},
+    )
+
+
+@app.get("/api/pipeline/jobs")
+def pipeline_list_jobs():
+    """List recent jobs."""
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": j["id"],
+                "status": j["status"],
+                "created_at": j["created_at"],
+                "collected": j["progress"]["collected"],
+                "total": j["progress"]["total_datajud"],
+            }
+            for j in sorted(jobs.values(), key=lambda x: x["created_at"], reverse=True)[:10]
+        ],
+    }
 
 
 if __name__ == "__main__":

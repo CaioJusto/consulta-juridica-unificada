@@ -393,14 +393,143 @@ export function PipelineTab() {
   const [rows, setRows] = useState<PipelineRow[]>([]);
   const [error, setError] = useState("");
   const [selectedRow, setSelectedRow] = useState<PipelineRow | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [rowCount, setRowCount] = useState(0);
 
-  const abortRef = useRef(false);
-  const pauseRef = useRef(false);
-  const rowsRef = useRef<PipelineRow[]>([]);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // On mount: resume polling if there's an active job in localStorage
   useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
+    const savedJobId = localStorage.getItem("activeJobId");
+    if (savedJobId) {
+      setJobId(savedJobId);
+    }
+  }, []);
+
+  // Poll server for job status
+  useEffect(() => {
+    if (!jobId) return;
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/pipeline/status/${jobId}`);
+        const j = await r.json();
+        if (!j.success) {
+          // Job not found (server restart?) — clear
+          localStorage.removeItem("activeJobId");
+          setJobId(null);
+          if (pollRef.current) clearInterval(pollRef.current);
+          return;
+        }
+        const data = j.data;
+        const progress = data.progress;
+
+        // Map server status to phase
+        const statusMap: Record<string, Phase> = {
+          running: progress.stage === "collecting" ? "collecting"
+            : progress.enriched_processual > 0 && progress.enriched_publico === 0 ? "enriching_processual"
+            : progress.enriched_publico > 0 ? "enriching_publico"
+            : "collecting",
+          paused: "paused",
+          stopped: "aborted",
+          done: "done",
+          error: "idle",
+        };
+        setPhase(statusMap[data.status] || "idle");
+
+        // Update progress bars
+        const collected = progress.collected || 0;
+        const total = progress.total_datajud || 0;
+        const enrichedP = progress.enriched_processual || 0;
+        const enrichedPub = progress.enriched_publico || 0;
+
+        setPipelineState({
+          datajudGrandTotal: total,
+          stage1: {
+            status: data.status === "done" ? "done" : data.status === "running" ? "running" : "done",
+            current: collected,
+            total: total,
+            startedAt: 0,
+          },
+          stage2: {
+            status: enrichedP > 0 ? (data.status === "done" ? "done" : "running") : (collected > 0 ? "skipped" : "waiting"),
+            current: enrichedP,
+            total: collected,
+            startedAt: 0,
+          },
+          stage3: {
+            status: enrichedPub > 0 ? (data.status === "done" ? "done" : "running") : (collected > 0 ? "skipped" : "waiting"),
+            current: enrichedPub,
+            total: collected,
+            startedAt: 0,
+          },
+        });
+
+        setRowCount(data.row_count || 0);
+
+        // Show preview rows (last 20 from server)
+        if (data.preview_rows && data.preview_rows.length > 0) {
+          // Convert server row format to PipelineRow for display
+          const serverRows: PipelineRow[] = data.preview_rows.map((r: Record<string, unknown>, i: number) => ({
+            id: `${jobId}-${i}`,
+            numero_processo: String(r.numero_processo || ""),
+            tribunal: String(r.tribunal || ""),
+            classe: String(r.classe || ""),
+            orgao_julgador: String(r.orgao_julgador || ""),
+            grau: String(r.grau || ""),
+            data_ajuizamento: String(r.data_ajuizamento || ""),
+            ultima_atualizacao: String(r.ultima_atualizacao || ""),
+            assuntos: String(r.assuntos || ""),
+            qtd_movimentos: Number(r.qtd_movimentos || 0),
+            primeira_movimentacao: "",
+            ultima_mov_data: "",
+            ultima_mov_nome: String(r.ultima_movimentacao || ""),
+            polo_ativo_nome: String(r.polo_ativo_nome || ""),
+            polo_ativo_cpf: String(r.polo_ativo_cpf || ""),
+            polo_passivo_nome: String(r.polo_passivo_nome || ""),
+            polo_passivo_cnpj: String(r.polo_passivo_cnpj || ""),
+            partes: "",
+            advogados: String(r.advogados || ""),
+            qtd_partes: 0,
+            qtd_advogados: 0,
+            situacao_processual: String(r.situacao_processual || ""),
+            valor_causa: String(r.valor_causa || ""),
+            situacao_publico: String(r.situacao_pje || ""),
+            orgao_julgador_pje: String(r.orgao_julgador_pje || ""),
+            data_distribuicao_pje: "",
+            ultima_mov_publico: "",
+            processual_status: r.polo_ativo_nome ? "found" : "skipped",
+            publico_status: r.valor_causa ? "found" : "skipped",
+            processual_partes: [],
+            processual_movimentacoes: [],
+            publico_partes: [],
+            publico_movimentacoes: [],
+          }));
+          setRows(serverRows);
+        }
+
+        if (data.error) setError(data.error);
+
+        // Stop polling when terminal state reached
+        if (["done", "stopped", "error"].includes(data.status)) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          if (data.status === "done" || data.status === "stopped") {
+            localStorage.removeItem("activeJobId");
+          }
+        }
+      } catch {
+        // Network error — keep polling
+      }
+    };
+
+    poll(); // immediate first poll
+    pollRef.current = setInterval(poll, 2000);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [jobId]);
 
   // SGT debounced searches
   useEffect(() => {
@@ -474,470 +603,116 @@ export function PipelineTab() {
     }));
   }
 
-  // ─── pipeline execution ──────────────────────────────────────
+  // ─── pipeline execution (server-side) ─────────────────────────
 
-  const runPipeline = useCallback(async () => {
-    abortRef.current = false;
-    pauseRef.current = false;
+  const runPipeline = async () => {
     setError("");
     setRows([]);
-    rowsRef.current = [];
     setSelectedRow(null);
     setPhase("collecting");
+    setPipelineState(INITIAL_PIPELINE);
+    setRowCount(0);
 
-    const limitNum = config.limit === "all" ? Infinity : parseInt(config.limit) || 1000;
-    const pageSize = Math.min(limitNum === Infinity ? 200 : Math.min(limitNum, 200), 200);
-
-    setPipelineState({
-      stage1: { status: "running", current: 0, total: 0, startedAt: Date.now() },
-      stage2: makeStage(),
-      stage3: makeStage(),
-      datajudGrandTotal: 0,
-    });
-
-    const baseBody: Record<string, unknown> = {
+    // Build payload for backend
+    const payload: Record<string, unknown> = {
       tribunal_alias: config.tribunal,
-      page_size: pageSize,
+      limit: config.limit,
       sort_field: config.sortField || "dataHoraUltimaAtualizacao",
       sort_order: config.sortOrder || "desc",
+      enrich_processual: config.enrichProcessual,
+      enrich_publico: config.enrichPublico,
+      batch_size: config.batchSize,
     };
-    if (config.numero.trim()) baseBody.numero_processo = config.numero.trim();
-    if (config.classeCodigo.trim()) baseBody.classe_codigo = parseInt(config.classeCodigo.trim());
-    if (config.assuntosCodigos.length > 0) baseBody.assuntos_codigos = config.assuntosCodigos.map(a => parseInt(a.codigo));
-    if (config.assuntosExcluir.length > 0) baseBody.assuntos_excluir_codigos = config.assuntosExcluir.map(a => parseInt(a.codigo));
-    if (config.orgaoJulgadorCodigo.trim()) baseBody.orgao_julgador_codigo = parseInt(config.orgaoJulgadorCodigo.trim());
-    if (config.grau && config.grau !== "all") baseBody.grau = config.grau;
-    if (config.dataInicio) baseBody.data_ajuizamento_inicio = config.dataInicio;
-    if (config.dataFim) baseBody.data_ajuizamento_fim = config.dataFim;
-    if (config.dataAtualizacaoInicio) baseBody.data_atualizacao_inicio = config.dataAtualizacaoInicio;
-    if (config.dataAtualizacaoFim) baseBody.data_atualizacao_fim = config.dataAtualizacaoFim;
-    if (config.movimentoCodigo.trim()) baseBody.movimento_codigo = parseInt(config.movimentoCodigo.trim());
-    if (config.minMovimentos) baseBody.min_movimentos = parseInt(config.minMovimentos);
-    if (config.maxMovimentos) baseBody.max_movimentos = parseInt(config.maxMovimentos);
-    if (config.nivelSigilo !== "") baseBody.nivel_sigilo = parseInt(config.nivelSigilo);
-    if (config.temAssuntos === "yes") baseBody.tem_assuntos = true;
-    else if (config.temAssuntos === "no") baseBody.tem_assuntos = false;
-    if (config.temMovimentos === "yes") baseBody.tem_movimentos = true;
-    else if (config.temMovimentos === "no") baseBody.tem_movimentos = false;
-
-    // ── STAGE 1: DataJud paginado ─────────────────────────────
-
-    let searchAfter: unknown[] | null = null;
-    let totalCollected = 0;
-    let firstPage = true;
-    const collectedRows: PipelineRow[] = [];
+    if (config.numero.trim()) payload.numero_processo = config.numero.trim();
+    if (config.classeCodigo.trim()) payload.classe_codigo = parseInt(config.classeCodigo.trim());
+    if (config.assuntosCodigos.length > 0) payload.assuntos_codigos = config.assuntosCodigos.map(a => parseInt(a.codigo));
+    if (config.assuntosExcluir.length > 0) payload.assuntos_excluir_codigos = config.assuntosExcluir.map(a => parseInt(a.codigo));
+    if (config.orgaoJulgadorCodigo.trim()) payload.orgao_julgador_codigo = parseInt(config.orgaoJulgadorCodigo.trim());
+    if (config.grau && config.grau !== "all") payload.grau = config.grau;
+    if (config.dataInicio) payload.data_ajuizamento_inicio = config.dataInicio;
+    if (config.dataFim) payload.data_ajuizamento_fim = config.dataFim;
+    if (config.dataAtualizacaoInicio) payload.data_atualizacao_inicio = config.dataAtualizacaoInicio;
+    if (config.dataAtualizacaoFim) payload.data_atualizacao_fim = config.dataAtualizacaoFim;
+    if (config.movimentoCodigo.trim()) payload.movimento_codigo = parseInt(config.movimentoCodigo.trim());
+    if (config.minMovimentos) payload.min_movimentos = parseInt(config.minMovimentos);
+    if (config.maxMovimentos) payload.max_movimentos = parseInt(config.maxMovimentos);
+    if (config.nivelSigilo !== "") payload.nivel_sigilo = parseInt(config.nivelSigilo);
+    if (config.temAssuntos === "yes") payload.tem_assuntos = true;
+    else if (config.temAssuntos === "no") payload.tem_assuntos = false;
+    if (config.temMovimentos === "yes") payload.tem_movimentos = true;
+    else if (config.temMovimentos === "no") payload.tem_movimentos = false;
 
     try {
-      while (true) {
-        if (abortRef.current) break;
-
-        if (pauseRef.current) {
-          setPhase("paused");
-          await new Promise<void>((resolve) => {
-            const check = setInterval(() => {
-              if (!pauseRef.current || abortRef.current) {
-                clearInterval(check);
-                resolve();
-              }
-            }, 300);
-          });
-          if (abortRef.current) break;
-          setPhase("collecting");
-        }
-
-        const body: Record<string, unknown> = { ...baseBody };
-        if (searchAfter) body.search_after = searchAfter;
-
-        const res = await fetch(`${API_BASE}/api/datajud/buscar`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const json = await res.json();
-
-        if (!json.success || !json.data) {
-          setError(json.error || "Erro ao buscar no DataJud.");
-          setPhase("idle");
-          return;
-        }
-
-        const { processos, total, search_after: nextSA } = json.data as {
-          processos: DataJudProcesso[];
-          total: number;
-          search_after: unknown[] | null;
-        };
-
-        if (firstPage) {
-          firstPage = false;
-          setPipelineState((prev) => ({
-            ...prev,
-            datajudGrandTotal: total,
-            stage1: {
-              ...prev.stage1,
-              total: Math.min(total, limitNum === Infinity ? total : limitNum),
-            },
-          }));
-        }
-
-        if (!processos || processos.length === 0) break;
-
-        const newRows = processos.map((p) => makeRow(p, config.tribunal));
-        collectedRows.push(...newRows);
-        totalCollected += newRows.length;
-
-        setRows((prev) => [...prev, ...newRows]);
-        rowsRef.current = [...rowsRef.current, ...newRows];
-
-        updateStage("stage1", { current: totalCollected });
-
-        if (totalCollected >= limitNum) break;
-        if (!nextSA || processos.length < pageSize) break;
-
-        searchAfter = nextSA as unknown[];
-      }
-
-      if (abortRef.current) {
-        setPhase("aborted");
-        updateStage("stage1", { status: "done" });
-        return;
-      }
-
-      updateStage("stage1", { status: "done", current: totalCollected, total: totalCollected });
-
-      if (totalCollected === 0) {
-        setError("Nenhum processo encontrado no DataJud com esses filtros.");
+      const res = await fetch(`${API_BASE}/api/pipeline/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setError(json.error || "Erro ao iniciar pipeline.");
         setPhase("idle");
         return;
       }
-
-      // ── STAGE 2: TRF1 Processual enrichment ─────────────────
-
-      if (config.enrichProcessual) {
-        setPhase("enriching_processual");
-        const startedAt = Date.now();
-        updateStage("stage2", {
-          status: "running",
-          total: collectedRows.length,
-          current: 0,
-          startedAt,
-        });
-
-        let enrichedCount = 0;
-
-        await runBatched(
-          collectedRows,
-          config.batchSize,
-          async (row, globalIdx) => {
-            if (abortRef.current) return;
-
-            setRows((prev) =>
-              prev.map((r) => r.id === row.id ? { ...r, processual_status: "loading" } : r)
-            );
-
-            const updates: Partial<PipelineRow> = {};
-            try {
-              const digits = row.numero_processo.replace(/\D/g, "");
-              const r = await fetchWithTimeout(
-                `/api/processo?numero=${encodeURIComponent(digits)}&secao=TRF1`,
-                50000
-              );
-              const pj = await r.json();
-
-              if (pj.success && pj.data) {
-                const proc: Processo = pj.data;
-
-                // Split parties by role
-                const advogados = proc.partes.filter((p) => !!p.oab);
-                const partes = proc.partes.filter((p) => !p.oab);
-                const poloAtivo = partes.filter((p) =>
-                  p.tipo?.toUpperCase().includes("ATIVO") ||
-                  p.caracteristica?.toUpperCase().includes("ATIVO")
-                );
-                const poloPassivo = partes.filter((p) =>
-                  p.tipo?.toUpperCase().includes("PASSIVO") ||
-                  p.caracteristica?.toUpperCase().includes("PASSIVO")
-                );
-                // Fallback: se não há polo explícito, split meio a meio
-                const ativos = poloAtivo.length > 0 ? poloAtivo : partes.slice(0, Math.ceil(partes.length / 2));
-                const passivos = poloPassivo.length > 0 ? poloPassivo : partes.slice(Math.ceil(partes.length / 2));
-
-                updates.processual_status = "found";
-                updates.polo_ativo_nome = ativos.map((p) => p.nome).filter(Boolean).slice(0, 3).join("; ");
-                updates.polo_ativo_cpf = ativos.map((p) => p.entidade).filter(Boolean).slice(0, 1).join("");
-                updates.polo_passivo_nome = passivos.map((p) => p.nome).filter(Boolean).slice(0, 3).join("; ");
-                updates.polo_passivo_cnpj = passivos.map((p) => p.entidade).filter(Boolean).slice(0, 1).join("");
-                updates.partes = partes.map((p) => p.nome).filter(Boolean).slice(0, 5).join("; ");
-                updates.advogados = advogados
-                  .map((p) => (p.oab ? `${p.nome} (OAB: ${p.oab})` : p.nome))
-                  .filter(Boolean)
-                  .slice(0, 4)
-                  .join("; ");
-                updates.qtd_partes = partes.length;
-                updates.qtd_advogados = advogados.length;
-                updates.situacao_processual = proc.situacao || "";
-                updates.processual_partes = proc.partes;
-                updates.processual_movimentacoes = proc.movimentacoes || [];
-              } else {
-                updates.processual_status = "not_found";
-              }
-            } catch (e: unknown) {
-              updates.processual_status =
-                e instanceof Error && e.name === "AbortError" ? "error" : "error";
-            }
-
-            collectedRows[globalIdx] = { ...collectedRows[globalIdx], ...updates };
-            setRows((prev) =>
-              prev.map((r) => r.id === row.id ? { ...r, ...updates } : r)
-            );
-
-            enrichedCount++;
-            updateStage("stage2", { current: enrichedCount });
-          },
-          () => abortRef.current
-        );
-
-        updateStage("stage2", { status: "done", current: enrichedCount });
-
-        if (abortRef.current) {
-          setPhase("aborted");
-          return;
-        }
-      } else {
-        updateStage("stage2", { status: "skipped" });
-        setRows((prev) => prev.map((r) => ({ ...r, processual_status: "skipped" })));
-      }
-
-      // ── STAGE 3: TRF1 Público enrichment ─────────────────────
-
-      if (config.enrichPublico) {
-        setPhase("enriching_publico");
-        const startedAt = Date.now();
-        updateStage("stage3", {
-          status: "running",
-          total: collectedRows.length,
-          current: 0,
-          startedAt,
-        });
-
-        let enrichedCount3 = 0;
-        const batchSize3 = Math.max(1, Math.floor(config.batchSize / 2));
-
-        await runBatched(
-          collectedRows,
-          batchSize3,
-          async (row, globalIdx) => {
-            if (abortRef.current) return;
-
-            setRows((prev) =>
-              prev.map((r) => r.id === row.id ? { ...r, publico_status: "loading" } : r)
-            );
-
-            const updates: Partial<PipelineRow> = {};
-            try {
-              const formatted = formatCNJ(row.numero_processo);
-              const r = await fetchWithTimeout(
-                `/api/trf1publico/buscar?numero=${encodeURIComponent(formatted)}`,
-                60000
-              );
-              const pj = await r.json();
-
-              if (pj.success && pj.data?.processos?.length > 0) {
-                const pub: TRF1PublicProcess = pj.data.processos[0];
-                const lastMov = pub.movimentacoes?.[0];
-
-                updates.publico_status = "found";
-                updates.valor_causa = pub.valor_causa || "";
-                updates.situacao_publico = pub.situacao || "";
-                updates.orgao_julgador_pje = pub.orgao_julgador || "";
-                updates.data_distribuicao_pje = pub.data_distribuicao || "";
-                updates.ultima_mov_publico = lastMov
-                  ? `${lastMov.data}: ${lastMov.descricao}`
-                  : "";
-                updates.publico_partes = pub.partes || [];
-                updates.publico_movimentacoes = pub.movimentacoes || [];
-
-                // If processual was skipped, fill parties from público
-                if (!config.enrichProcessual) {
-                  const partesAtivos = pub.partes.filter(
-                    (p) => p.polo && p.polo.toUpperCase() !== "ADV"
-                  );
-                  const advs = pub.partes.filter(
-                    (p) => p.polo?.toUpperCase() === "ADV" || !!p.advogados
-                  );
-                  updates.partes = partesAtivos
-                    .map((p) => p.nome)
-                    .filter(Boolean)
-                    .slice(0, 5)
-                    .join("; ");
-                  updates.advogados = advs
-                    .map((p) => p.advogados || p.nome)
-                    .filter(Boolean)
-                    .slice(0, 3)
-                    .join("; ");
-                }
-              } else {
-                updates.publico_status = "not_found";
-              }
-            } catch {
-              updates.publico_status = "error";
-            }
-
-            collectedRows[globalIdx] = { ...collectedRows[globalIdx], ...updates };
-            setRows((prev) =>
-              prev.map((r) => r.id === row.id ? { ...r, ...updates } : r)
-            );
-
-            enrichedCount3++;
-            updateStage("stage3", { current: enrichedCount3 });
-          },
-          () => abortRef.current
-        );
-
-        updateStage("stage3", { status: "done", current: enrichedCount3 });
-
-        if (abortRef.current) {
-          setPhase("aborted");
-          return;
-        }
-      } else {
-        updateStage("stage3", { status: "skipped" });
-        setRows((prev) => prev.map((r) => ({ ...r, publico_status: "skipped" })));
-      }
-
-      setPhase("done");
+      const newJobId: string = json.job_id;
+      localStorage.setItem("activeJobId", newJobId);
+      setJobId(newJobId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erro de conexão.";
-      setError(`Erro durante o pipeline: ${msg}`);
+      setError(`Erro ao iniciar pipeline: ${msg}`);
       setPhase("idle");
     }
-  }, [config]);
+  };
 
-  function pausePipeline() {
-    pauseRef.current = !pauseRef.current;
+  async function pausePipeline() {
+    if (!jobId) return;
+    const action = phase === "paused" ? "resume" : "pause";
+    await fetch(`${API_BASE}/api/pipeline/control/${jobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
   }
 
-  function stopPipeline() {
-    abortRef.current = true;
-    pauseRef.current = false;
+  async function stopPipeline() {
+    if (!jobId) return;
+    await fetch(`${API_BASE}/api/pipeline/control/${jobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "stop" }),
+    });
   }
 
   function resetPipeline() {
-    abortRef.current = true;
-    pauseRef.current = false;
+    if (pollRef.current) clearInterval(pollRef.current);
+    localStorage.removeItem("activeJobId");
+    setJobId(null);
     setRows([]);
-    rowsRef.current = [];
     setPhase("idle");
     setError("");
     setPipelineState(INITIAL_PIPELINE);
     setSelectedRow(null);
+    setRowCount(0);
   }
 
-  // ─── CSV export ────────────────────────────────────────────
+  // ─── CSV export (server-side) ─────────────────────────────
 
-  function exportCSV(currentRows: PipelineRow[]) {
-    if (currentRows.length === 0) return;
-
-    const headers = [
-      // DataJud
-      "numero_processo",
-      "tribunal",
-      "classe",
-      "orgao_julgador",
-      "grau",
-      "data_ajuizamento",
-      "ultima_atualizacao",
-      "assuntos",
-      "qtd_movimentos",
-      "primeira_movimentacao",
-      "ultima_mov_data_datajud",
-      "ultima_mov_datajud",
-      // TRF1 Processual
-      ...(config.enrichProcessual
-        ? [
-            "polo_ativo_nome",
-            "polo_ativo_cpf",
-            "polo_passivo_nome",
-            "polo_passivo_cnpj",
-            "partes",
-            "advogados",
-            "qtd_partes",
-            "qtd_advogados",
-            "situacao_processual",
-          ]
-        : []),
-      // TRF1 Público
-      ...(config.enrichPublico
-        ? [
-            "valor_causa",
-            "situacao_pje",
-            "orgao_julgador_pje",
-            "data_distribuicao_pje",
-            "ultima_movimentacao_pje",
-          ]
-        : []),
-      "enriquecimentos",
-    ];
-
-    const csvRows = currentRows.map((r) => {
-      const enriq = ["DataJud"];
-      if (r.processual_status === "found") enriq.push("TRF1 Processual");
-      if (r.publico_status === "found") enriq.push("TRF1 Público");
-
-      return [
-        formatCNJ(r.numero_processo),
-        r.tribunal,
-        r.classe,
-        r.orgao_julgador,
-        r.grau,
-        r.data_ajuizamento,
-        r.ultima_atualizacao,
-        r.assuntos,
-        r.qtd_movimentos,
-        r.primeira_movimentacao,
-        r.ultima_mov_data,
-        r.ultima_mov_nome,
-        ...(config.enrichProcessual
-          ? [
-              r.polo_ativo_nome,
-              r.polo_ativo_cpf,
-              r.polo_passivo_nome,
-              r.polo_passivo_cnpj,
-              r.partes,
-              r.advogados,
-              r.qtd_partes,
-              r.qtd_advogados,
-              r.situacao_processual,
-            ]
-          : []),
-        ...(config.enrichPublico
-          ? [
-              r.valor_causa,
-              r.situacao_publico,
-              r.orgao_julgador_pje,
-              r.data_distribuicao_pje,
-              r.ultima_mov_publico,
-            ]
-          : []),
-        enriq.join(" + "),
-      ];
-    });
-
-    const csv = [
-      headers.join(","),
-      ...csvRows.map((row) =>
-        row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")
-      ),
-    ].join("\n");
-
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `pipeline_${new Date().toISOString().slice(0, 10)}_${currentRows.length}processos.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function exportCSV(_currentRows: PipelineRow[]) {
+    if (!jobId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/pipeline/export/${jobId}`);
+      if (!res.ok) { setError("Sem dados para exportar."); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `pipeline_${new Date().toISOString().slice(0, 10)}_${rowCount}processos.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Erro ao exportar CSV.");
+    }
   }
-
   // ─── count active pipeline filters ───────────────────────
 
   function countPipelineFilters(): number {
@@ -962,13 +737,13 @@ export function PipelineTab() {
 
   const isRunning = ["collecting", "enriching_processual", "enriching_publico"].includes(phase);
   const isPaused = phase === "paused";
-  const hasResults = rows.length > 0;
+  const hasResults = rowCount > 0 || rows.length > 0;
   const isDone = phase === "done" || phase === "aborted";
 
-  const enrichedProcessualCount = rows.filter((r) => r.processual_status === "found").length;
-  const enrichedPublicoCount = rows.filter((r) => r.publico_status === "found").length;
+  const enrichedProcessualCount = pipelineState.stage2.current || 0;
+  const enrichedPublicoCount = pipelineState.stage3.current || 0;
 
-  const previewRows = rows.slice(-20);
+  const previewRows = rows;
 
   const s1pct =
     pipelineState.stage1.total > 0
@@ -1086,8 +861,7 @@ export function PipelineTab() {
           )}
         </button>
 
-        {showFilters && (
-          <div className="space-y-5 pl-3 border-l-2 border-primary/20">
+        <div className={showFilters ? "space-y-5 pl-3 border-l-2 border-primary/20" : "hidden"}>
             {/* Classe + Assunto + Movimentação */}
             <div className="space-y-3">
               <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
@@ -1359,8 +1133,7 @@ export function PipelineTab() {
                 </div>
               </div>
             </div>
-          </div>
-        )}
+        </div>
 
         {/* Enrichment toggles */}
         <div className="flex flex-col sm:flex-row gap-3 pt-2 border-t border-border/50">
@@ -1457,12 +1230,12 @@ export function PipelineTab() {
           {hasResults && (
             <Button
               variant={isDone ? "default" : "outline"}
-              onClick={() => exportCSV(rowsRef.current)}
+              onClick={() => exportCSV(rows)}
               className="h-9 px-4 gap-2"
               data-testid="button-pipeline-export"
             >
               <Download className="w-3.5 h-3.5" />
-              Exportar CSV ({rows.length})
+              Exportar CSV ({rowCount || rows.length})
             </Button>
           )}
           {hasResults && !isRunning && !isPaused && (
@@ -1511,7 +1284,7 @@ export function PipelineTab() {
             <StatBadge
               icon={<Database className="w-3.5 h-3.5 text-blue-500" />}
               label="Coletados"
-              value={rows.length}
+              value={rowCount || rows.length}
               color="blue"
             />
             <StatBadge
@@ -1613,8 +1386,8 @@ export function PipelineTab() {
               <CheckCircle2 className="w-4 h-4 text-emerald-500" />
               <span className="text-emerald-600 dark:text-emerald-400 font-medium">
                 {phase === "done"
-                  ? `Pipeline concluído — ${rows.length} processos processados`
-                  : `Interrompido — ${rows.length} processos coletados`}
+                  ? `Pipeline concluído — ${rowCount || rows.length} processos processados`
+                  : `Interrompido — ${rowCount || rows.length} processos coletados`}
               </span>
             </div>
           )}
@@ -1626,8 +1399,8 @@ export function PipelineTab() {
         <div className="rounded-lg border border-border overflow-hidden">
           <div className="px-3 py-2 bg-muted/50 border-b border-border flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">
-              Prévia — últimos {previewRows.length} de {rows.length} processos
-              {pipelineState.datajudGrandTotal > rows.length && (
+              Prévia — últimos {previewRows.length} de {rowCount || rows.length} processos
+              {pipelineState.datajudGrandTotal > (rowCount || rows.length) && (
                 <span className="ml-1 text-muted-foreground/60">
                   ({pipelineState.datajudGrandTotal.toLocaleString("pt-BR")} total no índice)
                 </span>
@@ -1640,11 +1413,11 @@ export function PipelineTab() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => exportCSV(rowsRef.current)}
+                onClick={() => exportCSV(rows)}
                 className="h-7 text-xs gap-1.5"
               >
                 <Download className="w-3 h-3" />
-                CSV ({rows.length})
+                CSV ({rowCount || rows.length})
               </Button>
             </div>
           </div>

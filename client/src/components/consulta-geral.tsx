@@ -639,8 +639,7 @@ export function ConsultaGeral() {
           )}
         </button>
 
-        {showFilters && (
-          <div className="space-y-5 pl-3 border-l-2 border-primary/20">
+        <div className={showFilters ? "space-y-5 pl-3 border-l-2 border-primary/20" : "hidden"}>
             {/* Row 1: Classe + Assunto + Movimentação (com busca SGT) */}
             <div className="space-y-3">
               <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
@@ -992,8 +991,7 @@ export function ConsultaGeral() {
                 </div>
               </div>
             </div>
-          </div>
-        )}
+        </div>
 
         {/* Search button */}
         <Button
