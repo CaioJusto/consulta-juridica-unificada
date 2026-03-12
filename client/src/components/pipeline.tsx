@@ -56,6 +56,7 @@ import {
   ArrowRightLeft,
   Hash,
   Eye,
+  X,
 } from "lucide-react";
 import type {
   TribunalOption,
@@ -385,16 +386,46 @@ export function PipelineTab() {
     tribunal: "api_publica_trf1",
     numero: "",
     classeCodigo: "",
-    assuntoCodigo: "",
+    classeNome: "",
+    assuntosCodigos: [],
+    assuntosExcluir: [],
+    orgaoJulgadorCodigo: "",
+    orgaoJulgadorNome: "",
     grau: "",
     dataInicio: "",
     dataFim: "",
+    dataAtualizacaoInicio: "",
+    dataAtualizacaoFim: "",
     movimentoCodigo: "",
+    movimentoNome: "",
+    minMovimentos: "",
+    maxMovimentos: "",
+    nivelSigilo: "",
+    temAssuntos: "any",
+    temMovimentos: "any",
+    sortField: "dataHoraUltimaAtualizacao",
+    sortOrder: "desc",
     limit: "1000",
     enrichProcessual: true,
     enrichPublico: false,
     batchSize: 8,
   });
+
+  // SGT autocomplete states for pipeline
+  const [classeQuery, setClasseQuery] = useState("");
+  const [classeResults, setClasseResults] = useState<SgtOption[]>([]);
+  const [classeLoading, setClasseLoading] = useState(false);
+  const [assuntoQuery, setAssuntoQuery] = useState("");
+  const [assuntoResults, setAssuntoResults] = useState<SgtOption[]>([]);
+  const [assuntoLoading, setAssuntoLoading] = useState(false);
+  const [assuntoExcluirQuery, setAssuntoExcluirQuery] = useState("");
+  const [assuntoExcluirResults, setAssuntoExcluirResults] = useState<SgtOption[]>([]);
+  const [assuntoExcluirLoading, setAssuntoExcluirLoading] = useState(false);
+  const [movimentoQuery, setMovimentoQuery] = useState("");
+  const [movimentoResults, setMovimentoResults] = useState<SgtOption[]>([]);
+  const [movimentoLoading, setMovimentoLoading] = useState(false);
+  const [orgaoQuery, setOrgaoQuery] = useState("");
+  const [orgaoResults, setOrgaoResults] = useState<SgtOption[]>([]);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [pipelineState, setPipelineState] = useState<PipelineState>(INITIAL_PIPELINE);
@@ -409,6 +440,55 @@ export function PipelineTab() {
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
+
+  // SGT debounced searches
+  useEffect(() => {
+    if (classeQuery.length < 2) { setClasseResults([]); return; }
+    setClasseLoading(true);
+    const t = setTimeout(async () => {
+      try { const r = await fetch(`${API_BASE}/api/datajud/sgt?kind=classe&q=${encodeURIComponent(classeQuery)}`); const j = await r.json(); if (j.success) setClasseResults(j.data || []); } catch {}
+      setClasseLoading(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [classeQuery]);
+
+  useEffect(() => {
+    if (assuntoQuery.length < 2) { setAssuntoResults([]); return; }
+    setAssuntoLoading(true);
+    const t = setTimeout(async () => {
+      try { const r = await fetch(`${API_BASE}/api/datajud/sgt?kind=assunto&q=${encodeURIComponent(assuntoQuery)}`); const j = await r.json(); if (j.success) setAssuntoResults(j.data || []); } catch {}
+      setAssuntoLoading(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [assuntoQuery]);
+
+  useEffect(() => {
+    if (assuntoExcluirQuery.length < 2) { setAssuntoExcluirResults([]); return; }
+    setAssuntoExcluirLoading(true);
+    const t = setTimeout(async () => {
+      try { const r = await fetch(`${API_BASE}/api/datajud/sgt?kind=assunto&q=${encodeURIComponent(assuntoExcluirQuery)}`); const j = await r.json(); if (j.success) setAssuntoExcluirResults(j.data || []); } catch {}
+      setAssuntoExcluirLoading(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [assuntoExcluirQuery]);
+
+  useEffect(() => {
+    if (movimentoQuery.length < 2) { setMovimentoResults([]); return; }
+    setMovimentoLoading(true);
+    const t = setTimeout(async () => {
+      try { const r = await fetch(`${API_BASE}/api/datajud/sgt?kind=movimento&q=${encodeURIComponent(movimentoQuery)}`); const j = await r.json(); if (j.success) setMovimentoResults(j.data || []); } catch {}
+      setMovimentoLoading(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [movimentoQuery]);
+
+  useEffect(() => {
+    if (orgaoQuery.length < 2) { setOrgaoResults([]); return; }
+    const t = setTimeout(async () => {
+      try { const r = await fetch(`${API_BASE}/api/datajud/orgaos?tribunal=${config.tribunal}&q=${encodeURIComponent(orgaoQuery)}`); const j = await r.json(); if (j.success) setOrgaoResults(j.data || []); } catch {}
+    }, 300);
+    return () => clearTimeout(t);
+  }, [orgaoQuery, config.tribunal]);
 
   useEffect(() => {
     fetch(`${API_BASE}/api/datajud/tribunais`)
@@ -457,16 +537,27 @@ export function PipelineTab() {
     const baseBody: Record<string, unknown> = {
       tribunal_alias: config.tribunal,
       page_size: pageSize,
-      sort_field: "dataAjuizamento",
-      sort_order: "desc",
+      sort_field: config.sortField || "dataHoraUltimaAtualizacao",
+      sort_order: config.sortOrder || "desc",
     };
     if (config.numero.trim()) baseBody.numero_processo = config.numero.trim();
     if (config.classeCodigo.trim()) baseBody.classe_codigo = parseInt(config.classeCodigo.trim());
-    if (config.assuntoCodigo.trim()) baseBody.assunto_codigo = parseInt(config.assuntoCodigo.trim());
+    if (config.assuntosCodigos.length > 0) baseBody.assuntos_codigos = config.assuntosCodigos.map(a => parseInt(a.codigo));
+    if (config.assuntosExcluir.length > 0) baseBody.assuntos_excluir_codigos = config.assuntosExcluir.map(a => parseInt(a.codigo));
+    if (config.orgaoJulgadorCodigo.trim()) baseBody.orgao_julgador_codigo = parseInt(config.orgaoJulgadorCodigo.trim());
     if (config.grau && config.grau !== "all") baseBody.grau = config.grau;
     if (config.dataInicio) baseBody.data_ajuizamento_inicio = config.dataInicio;
     if (config.dataFim) baseBody.data_ajuizamento_fim = config.dataFim;
+    if (config.dataAtualizacaoInicio) baseBody.data_atualizacao_inicio = config.dataAtualizacaoInicio;
+    if (config.dataAtualizacaoFim) baseBody.data_atualizacao_fim = config.dataAtualizacaoFim;
     if (config.movimentoCodigo.trim()) baseBody.movimento_codigo = parseInt(config.movimentoCodigo.trim());
+    if (config.minMovimentos) baseBody.min_movimentos = parseInt(config.minMovimentos);
+    if (config.maxMovimentos) baseBody.max_movimentos = parseInt(config.maxMovimentos);
+    if (config.nivelSigilo !== "") baseBody.nivel_sigilo = parseInt(config.nivelSigilo);
+    if (config.temAssuntos === "yes") baseBody.tem_assuntos = true;
+    else if (config.temAssuntos === "no") baseBody.tem_assuntos = false;
+    if (config.temMovimentos === "yes") baseBody.tem_movimentos = true;
+    else if (config.temMovimentos === "no") baseBody.tem_movimentos = false;
 
     // ── STAGE 1: DataJud paginado ─────────────────────────────
 
@@ -886,6 +977,26 @@ export function PipelineTab() {
     URL.revokeObjectURL(url);
   }
 
+  // ─── count active pipeline filters ───────────────────────
+
+  function countPipelineFilters(): number {
+    let count = 0;
+    if (config.classeCodigo) count++;
+    if (config.assuntosCodigos.length > 0) count++;
+    if (config.assuntosExcluir.length > 0) count++;
+    if (config.orgaoJulgadorCodigo) count++;
+    if (config.grau && config.grau !== "all") count++;
+    if (config.dataInicio || config.dataFim) count++;
+    if (config.dataAtualizacaoInicio || config.dataAtualizacaoFim) count++;
+    if (config.movimentoCodigo) count++;
+    if (config.minMovimentos || config.maxMovimentos) count++;
+    if (config.nivelSigilo !== "") count++;
+    if (config.temAssuntos !== "any") count++;
+    if (config.temMovimentos !== "any") count++;
+    if (config.sortField !== "dataHoraUltimaAtualizacao" || config.sortOrder !== "desc") count++;
+    return count;
+  }
+
   // ─── derived state ────────────────────────────────────────
 
   const isRunning = ["collecting", "enriching_processual", "enriching_publico"].includes(phase);
@@ -1008,79 +1119,284 @@ export function PipelineTab() {
         >
           <Filter className="w-3.5 h-3.5" />
           {showFilters ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          Filtros adicionais (classe, assunto, grau, datas, movimentação)
+          Filtros avançados
+          {countPipelineFilters() > 0 && (
+            <Badge variant="secondary" className="text-[10px] ml-1">{countPipelineFilters()}</Badge>
+          )}
         </button>
 
         {showFilters && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pl-3 border-l-2 border-primary/20">
-            <div className="space-y-1">
-              <Label className="text-[10px] text-muted-foreground">Código da Classe</Label>
-              <Input
-                value={config.classeCodigo}
-                onChange={(e) => upd("classeCodigo", e.target.value)}
-                placeholder="Ex: 1116"
-                className="h-7 text-xs"
-                disabled={isRunning || isPaused}
-              />
+          <div className="space-y-5 pl-3 border-l-2 border-primary/20">
+            {/* Classe + Assunto + Movimentação */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <FileText className="w-3 h-3" /> Classe · Assunto · Movimentação
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {/* Classe */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Classe Judicial</Label>
+                  {config.classeCodigo ? (
+                    <div className="flex items-center gap-2 h-8 px-2 bg-muted/50 rounded-md">
+                      <span className="text-xs truncate flex-1">{config.classeNome} ({config.classeCodigo})</span>
+                      <button type="button" onClick={() => { upd("classeCodigo", ""); upd("classeNome", ""); setClasseQuery(""); }} className="text-muted-foreground hover:text-foreground" disabled={isRunning}>
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Input value={classeQuery} onChange={(e) => setClasseQuery(e.target.value)} placeholder="Buscar classe..." className="h-8 text-xs" disabled={isRunning || isPaused} />
+                      {classeLoading && <div className="absolute right-2 top-1/2 -translate-y-1/2"><Loader2 className="w-3 h-3 animate-spin text-muted-foreground" /></div>}
+                      {classeResults.length > 0 && (
+                        <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                          {classeResults.map((item) => (
+                            <button key={item.codigo} type="button" className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                              onClick={() => { upd("classeCodigo", item.codigo); upd("classeNome", item.nome); setClasseQuery(""); setClasseResults([]); }}>
+                              <span className="font-mono text-muted-foreground mr-2">{item.codigo}</span>{item.nome}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {/* Assunto multi-select */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Assunto (até 5)</Label>
+                  <div className="flex flex-wrap gap-1 mb-1">
+                    {config.assuntosCodigos.map((a, i) => (
+                      <Badge key={i} variant="secondary" className="text-[10px] gap-1">
+                        {a.nome} ({a.codigo})
+                        <button type="button" onClick={() => upd("assuntosCodigos", config.assuntosCodigos.filter((_, j) => j !== i))} disabled={isRunning}>
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </Badge>
+                    ))}
+                  </div>
+                  {config.assuntosCodigos.length < 5 && (
+                    <div className="relative">
+                      <Input value={assuntoQuery} onChange={(e) => setAssuntoQuery(e.target.value)} placeholder="Buscar assunto..." className="h-8 text-xs" disabled={isRunning || isPaused} />
+                      {assuntoLoading && <div className="absolute right-2 top-1/2 -translate-y-1/2"><Loader2 className="w-3 h-3 animate-spin text-muted-foreground" /></div>}
+                      {assuntoResults.length > 0 && (
+                        <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                          {assuntoResults.map((item) => (
+                            <button key={item.codigo} type="button" className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                              onClick={() => { if (!config.assuntosCodigos.find(a => a.codigo === item.codigo) && config.assuntosCodigos.length < 5) upd("assuntosCodigos", [...config.assuntosCodigos, item]); setAssuntoQuery(""); setAssuntoResults([]); }}>
+                              <span className="font-mono text-muted-foreground mr-2">{item.codigo}</span>{item.nome}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {/* Movimentação */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Movimentação</Label>
+                  {config.movimentoCodigo ? (
+                    <div className="flex items-center gap-2 h-8 px-2 bg-muted/50 rounded-md">
+                      <span className="text-xs truncate flex-1">{config.movimentoNome} ({config.movimentoCodigo})</span>
+                      <button type="button" onClick={() => { upd("movimentoCodigo", ""); upd("movimentoNome", ""); setMovimentoQuery(""); }} className="text-muted-foreground hover:text-foreground" disabled={isRunning}>
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Input value={movimentoQuery} onChange={(e) => setMovimentoQuery(e.target.value)} placeholder="Buscar movimentação..." className="h-8 text-xs" disabled={isRunning || isPaused} />
+                      {movimentoLoading && <div className="absolute right-2 top-1/2 -translate-y-1/2"><Loader2 className="w-3 h-3 animate-spin text-muted-foreground" /></div>}
+                      {movimentoResults.length > 0 && (
+                        <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                          {movimentoResults.map((item) => (
+                            <button key={item.codigo} type="button" className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                              onClick={() => { upd("movimentoCodigo", item.codigo); upd("movimentoNome", item.nome); setMovimentoQuery(""); setMovimentoResults([]); }}>
+                              <span className="font-mono text-muted-foreground mr-2">{item.codigo}</span>{item.nome}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
-            <div className="space-y-1">
-              <Label className="text-[10px] text-muted-foreground">Código do Assunto</Label>
-              <Input
-                value={config.assuntoCodigo}
-                onChange={(e) => upd("assuntoCodigo", e.target.value)}
-                placeholder="Ex: 10672"
-                className="h-7 text-xs"
-                disabled={isRunning || isPaused}
-              />
+
+            {/* Assuntos a excluir */}
+            <div className="space-y-2">
+              <Label className="text-xs font-medium text-muted-foreground">Assuntos a Excluir</Label>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {config.assuntosExcluir.map((a, i) => (
+                  <Badge key={i} variant="destructive" className="text-[10px] gap-1">
+                    {a.nome} ({a.codigo})
+                    <button type="button" onClick={() => upd("assuntosExcluir", config.assuntosExcluir.filter((_, j) => j !== i))} disabled={isRunning}>
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+              <div className="relative max-w-xs">
+                <Input value={assuntoExcluirQuery} onChange={(e) => setAssuntoExcluirQuery(e.target.value)} placeholder="Buscar assunto para excluir..." className="h-8 text-xs" disabled={isRunning || isPaused} />
+                {assuntoExcluirLoading && <div className="absolute right-2 top-1/2 -translate-y-1/2"><Loader2 className="w-3 h-3 animate-spin text-muted-foreground" /></div>}
+                {assuntoExcluirResults.length > 0 && (
+                  <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                    {assuntoExcluirResults.map((item) => (
+                      <button key={item.codigo} type="button" className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                        onClick={() => { if (!config.assuntosExcluir.find(a => a.codigo === item.codigo)) upd("assuntosExcluir", [...config.assuntosExcluir, item]); setAssuntoExcluirQuery(""); setAssuntoExcluirResults([]); }}>
+                        <span className="font-mono text-muted-foreground mr-2">{item.codigo}</span>{item.nome}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="space-y-1">
-              <Label className="text-[10px] text-muted-foreground">Grau</Label>
-              <Select
-                value={config.grau}
-                onValueChange={(v) => upd("grau", v)}
-                disabled={isRunning || isPaused}
-              >
-                <SelectTrigger className="h-7 text-xs">
-                  <SelectValue placeholder="Todos" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="G1">1º Grau</SelectItem>
-                  <SelectItem value="G2">2º Grau</SelectItem>
-                  <SelectItem value="TR">Turma Recursal</SelectItem>
-                  <SelectItem value="JE">Juizado Especial</SelectItem>
-                </SelectContent>
-              </Select>
+
+            {/* Órgão Julgador + Grau */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <Building2 className="w-3 h-3" /> Órgão Julgador · Grau
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Órgão Julgador</Label>
+                  {config.orgaoJulgadorCodigo ? (
+                    <div className="flex items-center gap-2 h-8 px-2 bg-muted/50 rounded-md">
+                      <span className="text-xs truncate flex-1">{config.orgaoJulgadorNome} ({config.orgaoJulgadorCodigo})</span>
+                      <button type="button" onClick={() => { upd("orgaoJulgadorCodigo", ""); upd("orgaoJulgadorNome", ""); setOrgaoQuery(""); }} className="text-muted-foreground hover:text-foreground" disabled={isRunning}>
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Input value={orgaoQuery} onChange={(e) => setOrgaoQuery(e.target.value)} placeholder="Buscar órgão julgador..." className="h-8 text-xs" disabled={isRunning || isPaused} />
+                      {orgaoResults.length > 0 && (
+                        <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                          {orgaoResults.map((item) => (
+                            <button key={item.codigo} type="button" className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                              onClick={() => { upd("orgaoJulgadorCodigo", item.codigo); upd("orgaoJulgadorNome", item.nome); setOrgaoQuery(""); setOrgaoResults([]); }}>
+                              <span className="font-mono text-muted-foreground mr-2">{item.codigo}</span>{item.nome}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Grau</Label>
+                  <Select value={config.grau} onValueChange={(v) => upd("grau", v)} disabled={isRunning || isPaused}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Todos" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Todos</SelectItem>
+                      <SelectItem value="G1">1º Grau</SelectItem>
+                      <SelectItem value="G2">2º Grau</SelectItem>
+                      <SelectItem value="TR">Turma Recursal</SelectItem>
+                      <SelectItem value="JE">Juizado Especial</SelectItem>
+                      <SelectItem value="SUP">Superior</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </div>
-            <div className="space-y-1">
-              <Label className="text-[10px] text-muted-foreground">Código Movimentação</Label>
-              <Input
-                value={config.movimentoCodigo}
-                onChange={(e) => upd("movimentoCodigo", e.target.value)}
-                placeholder="Ex: 22"
-                className="h-7 text-xs"
-                disabled={isRunning || isPaused}
-              />
+
+            {/* Datas */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <Calendar className="w-3 h-3" /> Datas
+              </h4>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Ajuizamento (de)</Label>
+                  <Input type="date" value={config.dataInicio} onChange={(e) => upd("dataInicio", e.target.value)} className="h-8 text-xs" disabled={isRunning || isPaused} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Ajuizamento (até)</Label>
+                  <Input type="date" value={config.dataFim} onChange={(e) => upd("dataFim", e.target.value)} className="h-8 text-xs" disabled={isRunning || isPaused} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Atualização (de)</Label>
+                  <Input type="date" value={config.dataAtualizacaoInicio} onChange={(e) => upd("dataAtualizacaoInicio", e.target.value)} className="h-8 text-xs" disabled={isRunning || isPaused} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Atualização (até)</Label>
+                  <Input type="date" value={config.dataAtualizacaoFim} onChange={(e) => upd("dataAtualizacaoFim", e.target.value)} className="h-8 text-xs" disabled={isRunning || isPaused} />
+                </div>
+              </div>
             </div>
-            <div className="space-y-1">
-              <Label className="text-[10px] text-muted-foreground">Ajuizamento (de)</Label>
-              <Input
-                type="date"
-                value={config.dataInicio}
-                onChange={(e) => upd("dataInicio", e.target.value)}
-                className="h-7 text-xs"
-                disabled={isRunning || isPaused}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-[10px] text-muted-foreground">Ajuizamento (até)</Label>
-              <Input
-                type="date"
-                value={config.dataFim}
-                onChange={(e) => upd("dataFim", e.target.value)}
-                className="h-7 text-xs"
-                disabled={isRunning || isPaused}
-              />
+
+            {/* Presença + Quantidade + Sigilo */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <Info className="w-3 h-3" /> Presença · Quantidade · Sigilo
+              </h4>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Tem Assuntos?</Label>
+                  <Select value={config.temAssuntos} onValueChange={(v) => upd("temAssuntos", v)} disabled={isRunning || isPaused}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">Tanto faz</SelectItem>
+                      <SelectItem value="yes">Sim</SelectItem>
+                      <SelectItem value="no">Não</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Tem Movimentos?</Label>
+                  <Select value={config.temMovimentos} onValueChange={(v) => upd("temMovimentos", v)} disabled={isRunning || isPaused}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">Tanto faz</SelectItem>
+                      <SelectItem value="yes">Sim</SelectItem>
+                      <SelectItem value="no">Não</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Mín. Movimentos</Label>
+                  <Input type="number" min="0" value={config.minMovimentos} onChange={(e) => upd("minMovimentos", e.target.value)} placeholder="0" className="h-8 text-xs" disabled={isRunning || isPaused} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Máx. Movimentos</Label>
+                  <Input type="number" min="0" value={config.maxMovimentos} onChange={(e) => upd("maxMovimentos", e.target.value)} placeholder="∞" className="h-8 text-xs" disabled={isRunning || isPaused} />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Nível de Sigilo</Label>
+                  <Select value={config.nivelSigilo} onValueChange={(v) => upd("nivelSigilo", v)} disabled={isRunning || isPaused}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Qualquer" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Qualquer</SelectItem>
+                      <SelectItem value="0">Público (0)</SelectItem>
+                      <SelectItem value="1">Segredo de Justiça (1)</SelectItem>
+                      <SelectItem value="2">Nível 2</SelectItem>
+                      <SelectItem value="5">Mínimo (5)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Ordenação</Label>
+                  <Select value={config.sortField} onValueChange={(v) => upd("sortField", v)} disabled={isRunning || isPaused}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dataHoraUltimaAtualizacao">Última atualização</SelectItem>
+                      <SelectItem value="dataAjuizamento">Data ajuizamento</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Direção</Label>
+                  <div className="flex gap-3 h-8 items-center">
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input type="radio" name="pipelineSortOrder" value="desc" checked={config.sortOrder === "desc"} onChange={() => upd("sortOrder", "desc")} disabled={isRunning || isPaused} className="w-3 h-3" />
+                      Mais recente
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input type="radio" name="pipelineSortOrder" value="asc" checked={config.sortOrder === "asc"} onChange={() => upd("sortOrder", "asc")} disabled={isRunning || isPaused} className="w-3 h-3" />
+                      Mais antigo
+                    </label>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
