@@ -7,9 +7,10 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   // Proxy all /api/* requests to the Python FastAPI backend on port 8000
+  const PYTHON_API = process.env.PYTHON_API_URL || "http://127.0.0.1:8000";
   app.use("/api", async (req, res) => {
     try {
-      const url = new URL(req.url, "http://127.0.0.1:8000");
+      const url = new URL(req.url, PYTHON_API);
       url.pathname = "/api" + url.pathname;
 
       const fetchOptions: RequestInit = {
