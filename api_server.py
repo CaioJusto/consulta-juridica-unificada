@@ -676,12 +676,12 @@ def trf1_publico_buscar(
         from datajud_app.trf1_public import TRF1PublicSearchParams, search_trf1_public_bundle
 
         params = TRF1PublicSearchParams(
-            numero_processo=numero.strip(),
-            nome_parte=nome_parte.strip(),
-            documento_parte=documento.strip(),
-            nome_representante=nome_advogado.strip(),
-            numero_oab=oab.strip(),
-            uf_oab=oab_uf.strip().upper() if oab_uf.strip() else "",
+            process_number=numero.strip(),
+            party_name=nome_parte.strip(),
+            document_number=documento.strip(),
+            lawyer_name=nome_advogado.strip(),
+            oab_number=oab.strip(),
+            oab_state=oab_uf.strip().upper() if oab_uf.strip() else "",
         )
 
         bundle = search_trf1_public_bundle(params, max_details=10)
