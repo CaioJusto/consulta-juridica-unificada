@@ -69,6 +69,55 @@ import type {
   TRF1PublicMovement,
 } from "@shared/schema";
 
+// ─── Tribunal Fallback ────────────────────────────────────────
+
+const TRIBUNAIS_FALLBACK: TribunalOption[] = [
+  { label: "Superior Tribunal de Justiça", alias: "api_publica_stj" },
+  { label: "TRF da 1ª Região", alias: "api_publica_trf1" },
+  { label: "TRF da 2ª Região", alias: "api_publica_trf2" },
+  { label: "TRF da 3ª Região", alias: "api_publica_trf3" },
+  { label: "TRF da 4ª Região", alias: "api_publica_trf4" },
+  { label: "TRF da 5ª Região", alias: "api_publica_trf5" },
+  { label: "TRF da 6ª Região", alias: "api_publica_trf6" },
+  { label: "TJ do Acre", alias: "api_publica_tjac" },
+  { label: "TJ de Alagoas", alias: "api_publica_tjal" },
+  { label: "TJ do Amazonas", alias: "api_publica_tjam" },
+  { label: "TJ do Amapá", alias: "api_publica_tjap" },
+  { label: "TJ da Bahia", alias: "api_publica_tjba" },
+  { label: "TJ do Ceará", alias: "api_publica_tjce" },
+  { label: "TJ do DF e Territórios", alias: "api_publica_tjdft" },
+  { label: "TJ do Espírito Santo", alias: "api_publica_tjes" },
+  { label: "TJ de Goiás", alias: "api_publica_tjgo" },
+  { label: "TJ do Maranhão", alias: "api_publica_tjma" },
+  { label: "TJ de Minas Gerais", alias: "api_publica_tjmg" },
+  { label: "TJ de Mato Grosso do Sul", alias: "api_publica_tjms" },
+  { label: "TJ de Mato Grosso", alias: "api_publica_tjmt" },
+  { label: "TJ do Pará", alias: "api_publica_tjpa" },
+  { label: "TJ da Paraíba", alias: "api_publica_tjpb" },
+  { label: "TJ de Pernambuco", alias: "api_publica_tjpe" },
+  { label: "TJ do Piauí", alias: "api_publica_tjpi" },
+  { label: "TJ do Paraná", alias: "api_publica_tjpr" },
+  { label: "TJ do Rio de Janeiro", alias: "api_publica_tjrj" },
+  { label: "TJ do Rio Grande do Norte", alias: "api_publica_tjrn" },
+  { label: "TJ de Rondônia", alias: "api_publica_tjro" },
+  { label: "TJ de Roraima", alias: "api_publica_tjrr" },
+  { label: "TJ do Rio Grande do Sul", alias: "api_publica_tjrs" },
+  { label: "TJ de Santa Catarina", alias: "api_publica_tjsc" },
+  { label: "TJ de Sergipe", alias: "api_publica_tjse" },
+  { label: "TJ de São Paulo", alias: "api_publica_tjsp" },
+  { label: "TJ de Tocantins", alias: "api_publica_tjto" },
+  { label: "TST", alias: "api_publica_tst" },
+  { label: "TSE", alias: "api_publica_tse" },
+  { label: "STM", alias: "api_publica_stm" },
+];
+
+// ─── SGT types ────────────────────────────────────────────────
+
+interface SgtOption {
+  codigo: string;
+  nome: string;
+}
+
 // ─── helpers ─────────────────────────────────────────────────
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
@@ -190,11 +239,25 @@ interface PipelineConfig {
   tribunal: string;
   numero: string;
   classeCodigo: string;
-  assuntoCodigo: string;
+  classeNome: string;
+  assuntosCodigos: SgtOption[]; // multi-select up to 5
+  assuntosExcluir: SgtOption[]; // multi-select
+  orgaoJulgadorCodigo: string;
+  orgaoJulgadorNome: string;
   grau: string;
   dataInicio: string;
   dataFim: string;
+  dataAtualizacaoInicio: string;
+  dataAtualizacaoFim: string;
   movimentoCodigo: string;
+  movimentoNome: string;
+  minMovimentos: string;
+  maxMovimentos: string;
+  nivelSigilo: string;
+  temAssuntos: string; // "any" | "yes" | "no"
+  temMovimentos: string; // "any" | "yes" | "no"
+  sortField: string;
+  sortOrder: string;
   limit: string;
   enrichProcessual: boolean;
   enrichPublico: boolean;
@@ -277,7 +340,46 @@ const INITIAL_PIPELINE: PipelineState = {
 // ─── main component ──────────────────────────────────────────
 
 export function PipelineTab() {
-  const [tribunais, setTribunais] = useState<TribunalOption[]>([]);
+  const TRIBUNAIS_FALLBACK: TribunalOption[] = [
+    { label: "TRF da 1ª Região", alias: "api_publica_trf1" },
+    { label: "TRF da 2ª Região", alias: "api_publica_trf2" },
+    { label: "TRF da 3ª Região", alias: "api_publica_trf3" },
+    { label: "TRF da 4ª Região", alias: "api_publica_trf4" },
+    { label: "TRF da 5ª Região", alias: "api_publica_trf5" },
+    { label: "TRF da 6ª Região", alias: "api_publica_trf6" },
+    { label: "Superior Tribunal de Justiça", alias: "api_publica_stj" },
+    { label: "TST", alias: "api_publica_tst" },
+    { label: "TSE", alias: "api_publica_tse" },
+    { label: "STM", alias: "api_publica_stm" },
+    { label: "TJ do Acre", alias: "api_publica_tjac" },
+    { label: "TJ de Alagoas", alias: "api_publica_tjal" },
+    { label: "TJ do Amazonas", alias: "api_publica_tjam" },
+    { label: "TJ do Amapá", alias: "api_publica_tjap" },
+    { label: "TJ da Bahia", alias: "api_publica_tjba" },
+    { label: "TJ do Ceará", alias: "api_publica_tjce" },
+    { label: "TJ do DF e Territórios", alias: "api_publica_tjdft" },
+    { label: "TJ do Espírito Santo", alias: "api_publica_tjes" },
+    { label: "TJ de Goiás", alias: "api_publica_tjgo" },
+    { label: "TJ do Maranhão", alias: "api_publica_tjma" },
+    { label: "TJ de Minas Gerais", alias: "api_publica_tjmg" },
+    { label: "TJ de Mato Grosso do Sul", alias: "api_publica_tjms" },
+    { label: "TJ de Mato Grosso", alias: "api_publica_tjmt" },
+    { label: "TJ do Pará", alias: "api_publica_tjpa" },
+    { label: "TJ da Paraíba", alias: "api_publica_tjpb" },
+    { label: "TJ de Pernambuco", alias: "api_publica_tjpe" },
+    { label: "TJ do Piauí", alias: "api_publica_tjpi" },
+    { label: "TJ do Paraná", alias: "api_publica_tjpr" },
+    { label: "TJ do Rio de Janeiro", alias: "api_publica_tjrj" },
+    { label: "TJ do Rio Grande do Norte", alias: "api_publica_tjrn" },
+    { label: "TJ de Rondônia", alias: "api_publica_tjro" },
+    { label: "TJ de Roraima", alias: "api_publica_tjrr" },
+    { label: "TJ do Rio Grande do Sul", alias: "api_publica_tjrs" },
+    { label: "TJ de Santa Catarina", alias: "api_publica_tjsc" },
+    { label: "TJ de Sergipe", alias: "api_publica_tjse" },
+    { label: "TJ de São Paulo", alias: "api_publica_tjsp" },
+    { label: "TJ de Tocantins", alias: "api_publica_tjto" },
+  ];
+  const [tribunais, setTribunais] = useState<TribunalOption[]>(TRIBUNAIS_FALLBACK);
   const [showFilters, setShowFilters] = useState(false);
   const [config, setConfig] = useState<PipelineConfig>({
     tribunal: "api_publica_trf1",

@@ -143,12 +143,54 @@ function useSgtSearch(kind: string) {
         if (json.success) setResults(json.data || []);
       } catch {}
       setLoading(false);
-    }, 400);
+    }, 300);
     return () => clearTimeout(timer);
   }, [query, kind]);
 
   return { query, setQuery, results, loading };
 }
+
+// ─── Tribunal Fallback ──────────────────────────────────────────
+
+const TRIBUNAIS_FALLBACK: TribunalOption[] = [
+  { label: "Superior Tribunal de Justiça", alias: "api_publica_stj" },
+  { label: "TRF da 1ª Região", alias: "api_publica_trf1" },
+  { label: "TRF da 2ª Região", alias: "api_publica_trf2" },
+  { label: "TRF da 3ª Região", alias: "api_publica_trf3" },
+  { label: "TRF da 4ª Região", alias: "api_publica_trf4" },
+  { label: "TRF da 5ª Região", alias: "api_publica_trf5" },
+  { label: "TRF da 6ª Região", alias: "api_publica_trf6" },
+  { label: "TJ do Acre", alias: "api_publica_tjac" },
+  { label: "TJ de Alagoas", alias: "api_publica_tjal" },
+  { label: "TJ do Amazonas", alias: "api_publica_tjam" },
+  { label: "TJ do Amapá", alias: "api_publica_tjap" },
+  { label: "TJ da Bahia", alias: "api_publica_tjba" },
+  { label: "TJ do Ceará", alias: "api_publica_tjce" },
+  { label: "TJ do DF e Territórios", alias: "api_publica_tjdft" },
+  { label: "TJ do Espírito Santo", alias: "api_publica_tjes" },
+  { label: "TJ de Goiás", alias: "api_publica_tjgo" },
+  { label: "TJ do Maranhão", alias: "api_publica_tjma" },
+  { label: "TJ de Minas Gerais", alias: "api_publica_tjmg" },
+  { label: "TJ de Mato Grosso do Sul", alias: "api_publica_tjms" },
+  { label: "TJ de Mato Grosso", alias: "api_publica_tjmt" },
+  { label: "TJ do Pará", alias: "api_publica_tjpa" },
+  { label: "TJ da Paraíba", alias: "api_publica_tjpb" },
+  { label: "TJ de Pernambuco", alias: "api_publica_tjpe" },
+  { label: "TJ do Piauí", alias: "api_publica_tjpi" },
+  { label: "TJ do Paraná", alias: "api_publica_tjpr" },
+  { label: "TJ do Rio de Janeiro", alias: "api_publica_tjrj" },
+  { label: "TJ do Rio Grande do Norte", alias: "api_publica_tjrn" },
+  { label: "TJ de Rondônia", alias: "api_publica_tjro" },
+  { label: "TJ de Roraima", alias: "api_publica_tjrr" },
+  { label: "TJ do Rio Grande do Sul", alias: "api_publica_tjrs" },
+  { label: "TJ de Santa Catarina", alias: "api_publica_tjsc" },
+  { label: "TJ de Sergipe", alias: "api_publica_tjse" },
+  { label: "TJ de São Paulo", alias: "api_publica_tjsp" },
+  { label: "TJ de Tocantins", alias: "api_publica_tjto" },
+  { label: "TST", alias: "api_publica_tst" },
+  { label: "TSE", alias: "api_publica_tse" },
+  { label: "STM", alias: "api_publica_stm" },
+];
 
 // ─── Main Component ─────────────────────────────────────────────
 
@@ -168,7 +210,7 @@ export function ConsultaGeral() {
   const UF_LIST = Object.keys(UF_TRIBUNAL_MAP).sort();
 
   // Basic filters
-  const [tribunais, setTribunais] = useState<TribunalOption[]>([]);
+  const [tribunais, setTribunais] = useState<TribunalOption[]>(TRIBUNAIS_FALLBACK);
   const [tribunal, setTribunal] = useState("api_publica_trf1");
   const [ufSelect, setUfSelect] = useState(""); // quick-select UF → auto-sets tribunal
   const [numero, setNumero] = useState("");
@@ -178,7 +220,8 @@ export function ConsultaGeral() {
   const [showFilters, setShowFilters] = useState(false);
   const [classeCodigo, setClasseCodigo] = useState("");
   const [classeNome, setClasseNome] = useState("");
-  const [assuntoCodigo, setAssuntoCodigo] = useState("");
+  const [assuntosCodigos, setAssuntosCodigos] = useState<SgtOption[]>([]); // multi-select up to 5
+  const [assuntoCodigo, setAssuntoCodigo] = useState(""); // kept for legacy single-select compat
   const [assuntoNome, setAssuntoNome] = useState("");
   const [assuntosExcluir, setAssuntosExcluir] = useState<SgtOption[]>([]);
   const [movimentoCodigo, setMovimentoCodigo] = useState("");
@@ -195,6 +238,9 @@ export function ConsultaGeral() {
   const [temMovimentos, setTemMovimentos] = useState<string>("any");
   const [minMovimentos, setMinMovimentos] = useState("");
   const [maxMovimentos, setMaxMovimentos] = useState("");
+  const [nivelSigilo, setNivelSigilo] = useState("");
+  const [sortField, setSortField] = useState("dataHoraUltimaAtualizacao");
+  const [sortOrder, setSortOrder] = useState("desc");
 
   // Pagination
   const [pageSize, setPageSize] = useState(20);
@@ -228,7 +274,7 @@ export function ConsultaGeral() {
         if (json.success) setOrgaoResults(json.data || []);
       } catch {}
       setOrgaoLoading(false);
-    }, 400);
+    }, 300);
     return () => clearTimeout(timer);
   }, [orgaoQuery, tribunal]);
 
@@ -244,7 +290,7 @@ export function ConsultaGeral() {
       } catch {
         setAssuntoExcluirSgt(s => ({...s, loading: false}));
       }
-    }, 400);
+    }, 300);
     return () => clearTimeout(timer);
   }, [assuntoExcluirSgt.query]);
 
@@ -276,10 +322,13 @@ export function ConsultaGeral() {
     const body: any = {
       tribunal_alias: tribunal,
       page_size: pageSize,
+      sort_field: sortField,
+      sort_order: sortOrder,
     };
     if (numero.trim()) body.numero_processo = numero.trim();
     if (classeCodigo) body.classe_codigo = parseInt(classeCodigo);
-    if (assuntoCodigo) body.assunto_codigo = parseInt(assuntoCodigo);
+    if (assuntosCodigos.length > 0) body.assuntos_codigos = assuntosCodigos.map(a => parseInt(a.codigo));
+    else if (assuntoCodigo) body.assunto_codigo = parseInt(assuntoCodigo);
     if (assuntosExcluir.length > 0) body.assuntos_excluir_codigos = assuntosExcluir.map(a => parseInt(a.codigo));
     if (movimentoCodigo) body.movimento_codigo = parseInt(movimentoCodigo);
     if (orgaoJulgadorCodigo) body.orgao_julgador_codigo = parseInt(orgaoJulgadorCodigo);
@@ -288,6 +337,7 @@ export function ConsultaGeral() {
     if (dataFim) body.data_ajuizamento_fim = dataFim;
     if (dataAtualizacaoInicio) body.data_atualizacao_inicio = dataAtualizacaoInicio;
     if (dataAtualizacaoFim) body.data_atualizacao_fim = dataAtualizacaoFim;
+    if (nivelSigilo !== "") body.nivel_sigilo = parseInt(nivelSigilo);
     if (temAssuntos === "yes") body.tem_assuntos = true;
     else if (temAssuntos === "no") body.tem_assuntos = false;
     if (temMovimentos === "yes") body.tem_movimentos = true;
@@ -296,7 +346,7 @@ export function ConsultaGeral() {
     if (maxMovimentos) body.max_movimentos = parseInt(maxMovimentos);
     if (searchAfterCursor) body.search_after = searchAfterCursor;
     return body;
-  }, [tribunal, pageSize, numero, classeCodigo, assuntoCodigo, assuntosExcluir, movimentoCodigo, orgaoJulgadorCodigo, grau, dataInicio, dataFim, dataAtualizacaoInicio, dataAtualizacaoFim, temAssuntos, temMovimentos, minMovimentos, maxMovimentos]);
+  }, [tribunal, pageSize, sortField, sortOrder, numero, classeCodigo, assuntosCodigos, assuntoCodigo, assuntosExcluir, movimentoCodigo, orgaoJulgadorCodigo, grau, dataInicio, dataFim, dataAtualizacaoInicio, dataAtualizacaoFim, nivelSigilo, temAssuntos, temMovimentos, minMovimentos, maxMovimentos]);
 
   async function executeSearch(searchAfterCursor: any[] | null, page: number, newPageHistory?: (any[] | null)[]) {
     setState((s) => ({ ...s, loading: true, error: "" }));
@@ -446,6 +496,8 @@ export function ConsultaGeral() {
     setAllCollectedProcessos([]);
     setShowCollected(false);
     setCollectProgress({ current: 0, total: 0, collected: 0 });
+    // sync legacy single assunto from multi-select if needed
+    if (assuntosCodigos.length === 1) { setAssuntoCodigo(assuntosCodigos[0].codigo); setAssuntoNome(assuntosCodigos[0].nome); }
     // Reset to page 1
     executeSearch(null, 1, [null]);
   }
@@ -605,16 +657,42 @@ export function ConsultaGeral() {
                   onClear={() => { setClasseCodigo(""); setClasseNome(""); }}
                   testId="sgt-classe"
                 />
-                {/* Assunto */}
-                <SgtSearchField
-                  label="Assunto"
-                  sgt={assuntoSgt}
-                  selectedCode={assuntoCodigo}
-                  selectedName={assuntoNome}
-                  onSelect={(item) => { setAssuntoCodigo(item.codigo); setAssuntoNome(item.nome); }}
-                  onClear={() => { setAssuntoCodigo(""); setAssuntoNome(""); }}
-                  testId="sgt-assunto"
-                />
+                {/* Assunto (multi-select, up to 5) */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Assunto (até 5)</Label>
+                  <div className="flex flex-wrap gap-1 mb-1">
+                    {assuntosCodigos.map((a, i) => (
+                      <Badge key={i} variant="secondary" className="text-[10px] gap-1">
+                        {a.nome} ({a.codigo})
+                        <button type="button" onClick={() => setAssuntosCodigos(prev => prev.filter((_, j) => j !== i))} className="ml-0.5">
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </Badge>
+                    ))}
+                  </div>
+                  {assuntosCodigos.length < 5 && (
+                    <div className="relative">
+                      <Input
+                        value={assuntoSgt.query}
+                        onChange={(e) => assuntoSgt.setQuery(e.target.value)}
+                        placeholder="Buscar assunto..."
+                        className="h-8 text-xs"
+                        data-testid="input-sgt-assunto"
+                      />
+                      {assuntoSgt.loading && <div className="absolute right-2 top-1/2 -translate-y-1/2"><Loader2 className="w-3 h-3 animate-spin text-muted-foreground" /></div>}
+                      {assuntoSgt.results.length > 0 && (
+                        <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                          {assuntoSgt.results.map((item) => (
+                            <button key={item.codigo} type="button" className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors"
+                              onClick={() => { if (!assuntosCodigos.find(a => a.codigo === item.codigo) && assuntosCodigos.length < 5) setAssuntosCodigos(prev => [...prev, item]); assuntoSgt.setQuery(""); }}>
+                              <span className="font-mono text-muted-foreground mr-2">{item.codigo}</span>{item.nome}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
                 {/* Movimentação */}
                 <SgtSearchField
                   label="Movimentação"
@@ -724,10 +802,11 @@ export function ConsultaGeral() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">Todos</SelectItem>
-                      <SelectItem value="G1">1ª Instância</SelectItem>
-                      <SelectItem value="G2">2ª Instância</SelectItem>
-                      <SelectItem value="JE">Juizado Especial</SelectItem>
+                      <SelectItem value="G1">1º Grau</SelectItem>
+                      <SelectItem value="G2">2º Grau</SelectItem>
                       <SelectItem value="TR">Turma Recursal</SelectItem>
+                      <SelectItem value="JE">Juizado Especial</SelectItem>
+                      <SelectItem value="SUP">Superior</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -820,7 +899,56 @@ export function ConsultaGeral() {
               </div>
             </div>
 
-            {/* Row 5: Pagination config */}
+            {/* Row 5: Sigilo + Ordenação + Direção */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <Filter className="w-3 h-3" /> Sigilo · Ordenação · Direção
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Nível de Sigilo</Label>
+                  <Select value={nivelSigilo} onValueChange={setNivelSigilo}>
+                    <SelectTrigger className="h-8 text-xs" data-testid="select-nivel-sigilo">
+                      <SelectValue placeholder="Qualquer" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Qualquer</SelectItem>
+                      <SelectItem value="0">Público (0)</SelectItem>
+                      <SelectItem value="1">Segredo de Justiça (1)</SelectItem>
+                      <SelectItem value="2">Nível 2</SelectItem>
+                      <SelectItem value="5">Mínimo (5)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Ordenação</Label>
+                  <Select value={sortField} onValueChange={setSortField}>
+                    <SelectTrigger className="h-8 text-xs" data-testid="select-sort-field">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dataHoraUltimaAtualizacao">Última atualização</SelectItem>
+                      <SelectItem value="dataAjuizamento">Data ajuizamento</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Direção</Label>
+                  <div className="flex gap-2 h-8 items-center">
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input type="radio" name="sortOrder" value="desc" checked={sortOrder === "desc"} onChange={() => setSortOrder("desc")} className="w-3 h-3" />
+                      Mais recente
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                      <input type="radio" name="sortOrder" value="asc" checked={sortOrder === "asc"} onChange={() => setSortOrder("asc")} className="w-3 h-3" />
+                      Mais antigo
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 6: Pagination config */}
             <div className="space-y-3">
               <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
                 <Database className="w-3 h-3" /> Paginação
@@ -1099,7 +1227,8 @@ export function ConsultaGeral() {
   function countActiveFilters(): number {
     let count = 0;
     if (classeCodigo) count++;
-    if (assuntoCodigo) count++;
+    if (assuntosCodigos.length > 0) count++;
+    if (assuntoCodigo && assuntosCodigos.length === 0) count++;
     if (assuntosExcluir.length > 0) count++;
     if (movimentoCodigo) count++;
     if (orgaoJulgadorCodigo) count++;
@@ -1107,6 +1236,8 @@ export function ConsultaGeral() {
     if (ufSelect) count++;
     if (dataInicio || dataFim) count++;
     if (dataAtualizacaoInicio || dataAtualizacaoFim) count++;
+    if (nivelSigilo !== "") count++;
+    if (sortField !== "dataHoraUltimaAtualizacao" || sortOrder !== "desc") count++;
     if (temAssuntos !== "any") count++;
     if (temMovimentos !== "any") count++;
     if (minMovimentos || maxMovimentos) count++;

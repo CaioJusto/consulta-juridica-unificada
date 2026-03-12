@@ -285,7 +285,9 @@ def datajud_buscar(payload: dict = Body(...)):
     }
     """
     try:
-        tribunal_alias = payload.get("tribunal_alias", "api_publica_trf1")
+        tribunal_alias = (payload.get("tribunal_alias") or "api_publica_trf1").strip()
+        if not tribunal_alias:
+            tribunal_alias = "api_publica_trf1"
         page_size = max(1, min(int(payload.get("page_size", 20)), 10000))
 
         # Construir query
