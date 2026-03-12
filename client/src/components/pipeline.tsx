@@ -5,16 +5,23 @@
  * Passo 2: Enriquecimento em lote no TRF1 Processual (partes, advogados, situação)
  * Passo 3: Enriquecimento em lote TRF1 Público/PJe (valor da causa, situação PJe)
  *
+ * Filosofia: máximo de dados de CADA fonte, exibidos independentemente.
  * Exportação parcial em CSV disponível a qualquer momento.
  */
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -46,10 +53,25 @@ import {
   Info,
   BarChart3,
   Timer,
+  ArrowRightLeft,
+  Hash,
+  Eye,
 } from "lucide-react";
-import type { TribunalOption, DataJudProcesso, Processo, TRF1PublicProcess } from "@shared/schema";
+import type {
+  TribunalOption,
+  DataJudProcesso,
+  DataJudMovimento,
+  Processo,
+  Parte,
+  Movimentacao,
+  TRF1PublicProcess,
+  TRF1PublicParty,
+  TRF1PublicMovement,
+} from "@shared/schema";
 
 // ─── helpers ─────────────────────────────────────────────────
+
+const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 function formatCNJ(raw: string): string {
   const digits = raw.replace(/\D/g, "");
@@ -78,12 +100,24 @@ function estimateTimeRemaining(
 ): string {
   if (done === 0 || total === 0) return "—";
   const elapsed = (Date.now() - startedAt) / 1000;
-  const rate = done / elapsed; // items/sec
+  const rate = done / elapsed;
   const remaining = total - done;
   const seconds = rate > 0 ? remaining / rate : remaining * secondsPerItem;
   if (seconds < 60) return `~${Math.ceil(seconds)}s`;
   const minutes = Math.ceil(seconds / 60);
   return `~${minutes} min`;
+}
+
+/** Fetch with AbortController timeout (ms). Returns Response. */
+async function fetchWithTimeout(url: string, timeoutMs = 45000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${url}`, { signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Concurrency-limited batch runner
@@ -114,26 +148,42 @@ type Phase =
 
 interface PipelineRow {
   id: string;
-  // DataJud
+  // ── DataJud ──────────────────────────────────────────────
   numero_processo: string;
   classe: string;
   orgao_julgador: string;
   data_ajuizamento: string;
+  ultima_atualizacao: string;
   grau: string;
   assuntos: string;
   ultima_mov_data: string;
   ultima_mov_nome: string;
+  primeira_movimentacao: string;
+  qtd_movimentos: number;
   tribunal: string;
-  // TRF1 Processual
+  datajud_movimentos: DataJudMovimento[]; // raw for detail panel
+  // ── TRF1 Processual ──────────────────────────────────────
   processual_status: EnrichStatus;
-  partes: string;
-  advogados: string;
+  polo_ativo_nome: string;
+  polo_ativo_cpf: string;
+  polo_passivo_nome: string;
+  polo_passivo_cnpj: string;
+  partes: string;        // CSV-friendly: top 5 partes
+  advogados: string;     // CSV-friendly: top 4 advogados
+  qtd_partes: number;
+  qtd_advogados: number;
   situacao_processual: string;
-  // TRF1 Público
+  processual_partes: Parte[];            // full for detail panel
+  processual_movimentacoes: Movimentacao[]; // full for detail panel
+  // ── TRF1 Público ─────────────────────────────────────────
   publico_status: EnrichStatus;
   valor_causa: string;
   situacao_publico: string;
+  orgao_julgador_pje: string;
+  data_distribuicao_pje: string;
   ultima_mov_publico: string;
+  publico_partes: TRF1PublicParty[];       // full for detail panel
+  publico_movimentacoes: TRF1PublicMovement[]; // full for detail panel
 }
 
 interface PipelineConfig {
@@ -145,7 +195,7 @@ interface PipelineConfig {
   dataInicio: string;
   dataFim: string;
   movimentoCodigo: string;
-  limit: string; // number string or "all"
+  limit: string;
   enrichProcessual: boolean;
   enrichPublico: boolean;
   batchSize: number;
@@ -162,7 +212,7 @@ interface PipelineState {
   stage1: StageState;
   stage2: StageState;
   stage3: StageState;
-  datajudGrandTotal: number; // Total matching in DataJud index
+  datajudGrandTotal: number;
 }
 
 // ─── row factory ─────────────────────────────────────────────
@@ -172,25 +222,44 @@ function makeRow(p: DataJudProcesso, tribunal: string): PipelineRow {
     (b.data_hora || "").localeCompare(a.data_hora || "")
   );
   const last = sorted[0];
+  const first = sorted[sorted.length - 1];
   return {
     id: p.numero_processo,
     numero_processo: p.numero_processo,
     classe: p.classe,
     orgao_julgador: p.orgao_julgador,
     data_ajuizamento: formatDate(p.data_ajuizamento),
+    ultima_atualizacao: formatDate(p.ultima_atualizacao),
     grau: p.grau,
     assuntos: p.assuntos?.map((a) => a.nome).join("; ") ?? "",
     ultima_mov_data: last ? formatDate(last.data_hora) : "",
     ultima_mov_nome: last ? last.nome : "",
+    primeira_movimentacao: first ? `${formatDate(first.data_hora)}: ${first.nome}` : "",
+    qtd_movimentos: p.movimentos.length,
     tribunal,
+    datajud_movimentos: sorted,
+    // TRF1 Processual
     processual_status: "pending",
+    polo_ativo_nome: "",
+    polo_ativo_cpf: "",
+    polo_passivo_nome: "",
+    polo_passivo_cnpj: "",
     partes: "",
     advogados: "",
+    qtd_partes: 0,
+    qtd_advogados: 0,
     situacao_processual: "",
+    processual_partes: [],
+    processual_movimentacoes: [],
+    // TRF1 Público
     publico_status: "pending",
     valor_causa: "",
     situacao_publico: "",
+    orgao_julgador_pje: "",
+    data_distribuicao_pje: "",
     ultima_mov_publico: "",
+    publico_partes: [],
+    publico_movimentacoes: [],
   };
 }
 
@@ -229,18 +298,18 @@ export function PipelineTab() {
   const [pipelineState, setPipelineState] = useState<PipelineState>(INITIAL_PIPELINE);
   const [rows, setRows] = useState<PipelineRow[]>([]);
   const [error, setError] = useState("");
+  const [selectedRow, setSelectedRow] = useState<PipelineRow | null>(null);
 
-  // Refs for async control
   const abortRef = useRef(false);
   const pauseRef = useRef(false);
-  const rowsRef = useRef<PipelineRow[]>([]); // always in-sync with rows state
+  const rowsRef = useRef<PipelineRow[]>([]);
 
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
 
   useEffect(() => {
-    apiRequest("GET", "/api/datajud/tribunais")
+    fetch(`${API_BASE}/api/datajud/tribunais`)
       .then((r) => r.json())
       .then((json) => {
         if (json.success) setTribunais(json.data);
@@ -270,12 +339,12 @@ export function PipelineTab() {
     setError("");
     setRows([]);
     rowsRef.current = [];
+    setSelectedRow(null);
     setPhase("collecting");
 
     const limitNum = config.limit === "all" ? Infinity : parseInt(config.limit) || 1000;
     const pageSize = Math.min(limitNum === Infinity ? 200 : Math.min(limitNum, 200), 200);
 
-    // Reset pipeline state
     setPipelineState({
       stage1: { status: "running", current: 0, total: 0, startedAt: Date.now() },
       stage2: makeStage(),
@@ -283,7 +352,6 @@ export function PipelineTab() {
       datajudGrandTotal: 0,
     });
 
-    // Build base search body
     const baseBody: Record<string, unknown> = {
       tribunal_alias: config.tribunal,
       page_size: pageSize,
@@ -302,7 +370,6 @@ export function PipelineTab() {
 
     let searchAfter: unknown[] | null = null;
     let totalCollected = 0;
-    let grandTotal = 0;
     let firstPage = true;
     const collectedRows: PipelineRow[] = [];
 
@@ -310,7 +377,6 @@ export function PipelineTab() {
       while (true) {
         if (abortRef.current) break;
 
-        // Check pause — wait until unpaused
         if (pauseRef.current) {
           setPhase("paused");
           await new Promise<void>((resolve) => {
@@ -328,7 +394,11 @@ export function PipelineTab() {
         const body: Record<string, unknown> = { ...baseBody };
         if (searchAfter) body.search_after = searchAfter;
 
-        const res = await apiRequest("POST", "/api/datajud/buscar", body);
+        const res = await fetch(`${API_BASE}/api/datajud/buscar`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
         const json = await res.json();
 
         if (!json.success || !json.data) {
@@ -344,12 +414,14 @@ export function PipelineTab() {
         };
 
         if (firstPage) {
-          grandTotal = total;
           firstPage = false;
           setPipelineState((prev) => ({
             ...prev,
             datajudGrandTotal: total,
-            stage1: { ...prev.stage1, total: Math.min(total, limitNum === Infinity ? total : limitNum) },
+            stage1: {
+              ...prev.stage1,
+              total: Math.min(total, limitNum === Infinity ? total : limitNum),
+            },
           }));
         }
 
@@ -359,16 +431,12 @@ export function PipelineTab() {
         collectedRows.push(...newRows);
         totalCollected += newRows.length;
 
-        // Append to state immediately (streaming)
         setRows((prev) => [...prev, ...newRows]);
         rowsRef.current = [...rowsRef.current, ...newRows];
 
         updateStage("stage1", { current: totalCollected });
 
-        // Check limit
         if (totalCollected >= limitNum) break;
-
-        // No more pages
         if (!nextSA || processos.length < pageSize) break;
 
         searchAfter = nextSA as unknown[];
@@ -388,7 +456,7 @@ export function PipelineTab() {
         return;
       }
 
-      // ── STAGE 2: TRF1 Processual enrichment ───────────────
+      // ── STAGE 2: TRF1 Processual enrichment ─────────────────
 
       if (config.enrichProcessual) {
         setPhase("enriching_processual");
@@ -400,7 +468,6 @@ export function PipelineTab() {
           startedAt,
         });
 
-        // Mark all as loading initially in batches
         let enrichedCount = 0;
 
         await runBatched(
@@ -409,53 +476,64 @@ export function PipelineTab() {
           async (row, globalIdx) => {
             if (abortRef.current) return;
 
-            // Mark as loading
             setRows((prev) =>
-              prev.map((r) =>
-                r.id === row.id ? { ...r, processual_status: "loading" } : r
-              )
+              prev.map((r) => r.id === row.id ? { ...r, processual_status: "loading" } : r)
             );
 
             const updates: Partial<PipelineRow> = {};
             try {
               const digits = row.numero_processo.replace(/\D/g, "");
-              const r = await apiRequest(
-                "GET",
-                `/api/processo?numero=${encodeURIComponent(digits)}&secao=TRF1`
+              const r = await fetchWithTimeout(
+                `/api/processo?numero=${encodeURIComponent(digits)}&secao=TRF1`,
+                50000
               );
               const pj = await r.json();
 
               if (pj.success && pj.data) {
                 const proc: Processo = pj.data;
-                const partesNomes = proc.partes
-                  .filter((p) => !p.oab)
-                  .map((p) => p.nome)
-                  .filter(Boolean)
-                  .slice(0, 5)
-                  .join("; ");
-                const advNomes = proc.partes
-                  .filter((p) => !!p.oab)
+
+                // Split parties by role
+                const advogados = proc.partes.filter((p) => !!p.oab);
+                const partes = proc.partes.filter((p) => !p.oab);
+                const poloAtivo = partes.filter((p) =>
+                  p.tipo?.toUpperCase().includes("ATIVO") ||
+                  p.caracteristica?.toUpperCase().includes("ATIVO")
+                );
+                const poloPassivo = partes.filter((p) =>
+                  p.tipo?.toUpperCase().includes("PASSIVO") ||
+                  p.caracteristica?.toUpperCase().includes("PASSIVO")
+                );
+                // Fallback: se não há polo explícito, split meio a meio
+                const ativos = poloAtivo.length > 0 ? poloAtivo : partes.slice(0, Math.ceil(partes.length / 2));
+                const passivos = poloPassivo.length > 0 ? poloPassivo : partes.slice(Math.ceil(partes.length / 2));
+
+                updates.processual_status = "found";
+                updates.polo_ativo_nome = ativos.map((p) => p.nome).filter(Boolean).slice(0, 3).join("; ");
+                updates.polo_ativo_cpf = ativos.map((p) => p.entidade).filter(Boolean).slice(0, 1).join("");
+                updates.polo_passivo_nome = passivos.map((p) => p.nome).filter(Boolean).slice(0, 3).join("; ");
+                updates.polo_passivo_cnpj = passivos.map((p) => p.entidade).filter(Boolean).slice(0, 1).join("");
+                updates.partes = partes.map((p) => p.nome).filter(Boolean).slice(0, 5).join("; ");
+                updates.advogados = advogados
                   .map((p) => (p.oab ? `${p.nome} (OAB: ${p.oab})` : p.nome))
                   .filter(Boolean)
                   .slice(0, 4)
                   .join("; ");
-                updates.processual_status = "found";
-                updates.partes = partesNomes;
-                updates.advogados = advNomes;
+                updates.qtd_partes = partes.length;
+                updates.qtd_advogados = advogados.length;
                 updates.situacao_processual = proc.situacao || "";
+                updates.processual_partes = proc.partes;
+                updates.processual_movimentacoes = proc.movimentacoes || [];
               } else {
                 updates.processual_status = "not_found";
               }
-            } catch {
-              updates.processual_status = "error";
+            } catch (e: unknown) {
+              updates.processual_status =
+                e instanceof Error && e.name === "AbortError" ? "error" : "error";
             }
 
-            // Update row in state
             collectedRows[globalIdx] = { ...collectedRows[globalIdx], ...updates };
             setRows((prev) =>
-              prev.map((r) =>
-                r.id === row.id ? { ...r, ...updates } : r
-              )
+              prev.map((r) => r.id === row.id ? { ...r, ...updates } : r)
             );
 
             enrichedCount++;
@@ -464,10 +542,7 @@ export function PipelineTab() {
           () => abortRef.current
         );
 
-        updateStage("stage2", {
-          status: abortRef.current ? "done" : "done",
-          current: enrichedCount,
-        });
+        updateStage("stage2", { status: "done", current: enrichedCount });
 
         if (abortRef.current) {
           setPhase("aborted");
@@ -475,11 +550,10 @@ export function PipelineTab() {
         }
       } else {
         updateStage("stage2", { status: "skipped" });
-        // Mark all as skipped
         setRows((prev) => prev.map((r) => ({ ...r, processual_status: "skipped" })));
       }
 
-      // ── STAGE 3: TRF1 Público enrichment ──────────────────
+      // ── STAGE 3: TRF1 Público enrichment ─────────────────────
 
       if (config.enrichPublico) {
         setPhase("enriching_publico");
@@ -492,7 +566,7 @@ export function PipelineTab() {
         });
 
         let enrichedCount3 = 0;
-        const batchSize3 = Math.max(1, Math.floor(config.batchSize / 2)); // slower, half batch
+        const batchSize3 = Math.max(1, Math.floor(config.batchSize / 2));
 
         await runBatched(
           collectedRows,
@@ -501,30 +575,34 @@ export function PipelineTab() {
             if (abortRef.current) return;
 
             setRows((prev) =>
-              prev.map((r) =>
-                r.id === row.id ? { ...r, publico_status: "loading" } : r
-              )
+              prev.map((r) => r.id === row.id ? { ...r, publico_status: "loading" } : r)
             );
 
             const updates: Partial<PipelineRow> = {};
             try {
               const formatted = formatCNJ(row.numero_processo);
-              const r = await apiRequest(
-                "GET",
-                `/api/trf1publico/buscar?numero=${encodeURIComponent(formatted)}`
+              const r = await fetchWithTimeout(
+                `/api/trf1publico/buscar?numero=${encodeURIComponent(formatted)}`,
+                60000
               );
               const pj = await r.json();
 
               if (pj.success && pj.data?.processos?.length > 0) {
                 const pub: TRF1PublicProcess = pj.data.processos[0];
                 const lastMov = pub.movimentacoes?.[0];
+
                 updates.publico_status = "found";
                 updates.valor_causa = pub.valor_causa || "";
                 updates.situacao_publico = pub.situacao || "";
+                updates.orgao_julgador_pje = pub.orgao_julgador || "";
+                updates.data_distribuicao_pje = pub.data_distribuicao || "";
                 updates.ultima_mov_publico = lastMov
                   ? `${lastMov.data}: ${lastMov.descricao}`
                   : "";
-                // If processual was skipped, get parties from public
+                updates.publico_partes = pub.partes || [];
+                updates.publico_movimentacoes = pub.movimentacoes || [];
+
+                // If processual was skipped, fill parties from público
                 if (!config.enrichProcessual) {
                   const partesAtivos = pub.partes.filter(
                     (p) => p.polo && p.polo.toUpperCase() !== "ADV"
@@ -552,9 +630,7 @@ export function PipelineTab() {
 
             collectedRows[globalIdx] = { ...collectedRows[globalIdx], ...updates };
             setRows((prev) =>
-              prev.map((r) =>
-                r.id === row.id ? { ...r, ...updates } : r
-              )
+              prev.map((r) => r.id === row.id ? { ...r, ...updates } : r)
             );
 
             enrichedCount3++;
@@ -599,25 +675,52 @@ export function PipelineTab() {
     setPhase("idle");
     setError("");
     setPipelineState(INITIAL_PIPELINE);
+    setSelectedRow(null);
   }
 
-  // ─── CSV export ───────────────────────────────────────────
+  // ─── CSV export ────────────────────────────────────────────
 
   function exportCSV(currentRows: PipelineRow[]) {
     if (currentRows.length === 0) return;
 
     const headers = [
+      // DataJud
       "numero_processo",
       "tribunal",
       "classe",
       "orgao_julgador",
-      "data_ajuizamento",
       "grau",
+      "data_ajuizamento",
+      "ultima_atualizacao",
       "assuntos",
+      "qtd_movimentos",
+      "primeira_movimentacao",
       "ultima_mov_data_datajud",
       "ultima_mov_datajud",
-      ...(config.enrichProcessual ? ["partes", "advogados", "situacao_processual"] : []),
-      ...(config.enrichPublico ? ["valor_causa", "situacao_publico", "ultima_mov_publico"] : []),
+      // TRF1 Processual
+      ...(config.enrichProcessual
+        ? [
+            "polo_ativo_nome",
+            "polo_ativo_cpf",
+            "polo_passivo_nome",
+            "polo_passivo_cnpj",
+            "partes",
+            "advogados",
+            "qtd_partes",
+            "qtd_advogados",
+            "situacao_processual",
+          ]
+        : []),
+      // TRF1 Público
+      ...(config.enrichPublico
+        ? [
+            "valor_causa",
+            "situacao_pje",
+            "orgao_julgador_pje",
+            "data_distribuicao_pje",
+            "ultima_movimentacao_pje",
+          ]
+        : []),
       "enriquecimentos",
     ];
 
@@ -631,13 +734,36 @@ export function PipelineTab() {
         r.tribunal,
         r.classe,
         r.orgao_julgador,
-        r.data_ajuizamento,
         r.grau,
+        r.data_ajuizamento,
+        r.ultima_atualizacao,
         r.assuntos,
+        r.qtd_movimentos,
+        r.primeira_movimentacao,
         r.ultima_mov_data,
         r.ultima_mov_nome,
-        ...(config.enrichProcessual ? [r.partes, r.advogados, r.situacao_processual] : []),
-        ...(config.enrichPublico ? [r.valor_causa, r.situacao_publico, r.ultima_mov_publico] : []),
+        ...(config.enrichProcessual
+          ? [
+              r.polo_ativo_nome,
+              r.polo_ativo_cpf,
+              r.polo_passivo_nome,
+              r.polo_passivo_cnpj,
+              r.partes,
+              r.advogados,
+              r.qtd_partes,
+              r.qtd_advogados,
+              r.situacao_processual,
+            ]
+          : []),
+        ...(config.enrichPublico
+          ? [
+              r.valor_causa,
+              r.situacao_publico,
+              r.orgao_julgador_pje,
+              r.data_distribuicao_pje,
+              r.ultima_mov_publico,
+            ]
+          : []),
         enriq.join(" + "),
       ];
     });
@@ -668,9 +794,8 @@ export function PipelineTab() {
   const enrichedProcessualCount = rows.filter((r) => r.processual_status === "found").length;
   const enrichedPublicoCount = rows.filter((r) => r.publico_status === "found").length;
 
-  const previewRows = rows.slice(-20); // last 20 rows
+  const previewRows = rows.slice(-20);
 
-  // Stage progress pcts
   const s1pct =
     pipelineState.stage1.total > 0
       ? Math.min(100, Math.round((pipelineState.stage1.current / pipelineState.stage1.total) * 100))
@@ -688,7 +813,7 @@ export function PipelineTab() {
 
   return (
     <div className="space-y-4">
-      {/* ── Config Card ─────────────────────────────────── */}
+      {/* ── Config Card ──────────────────────────────────── */}
       <div className="bg-card border border-border rounded-lg p-4 space-y-4">
         <div className="flex items-center gap-2">
           <Zap className="w-4 h-4 text-primary" />
@@ -699,6 +824,7 @@ export function PipelineTab() {
         </div>
         <p className="text-xs text-muted-foreground -mt-2">
           Coleta paginada de todos os processos do DataJud + enriquecimento em lote com partes, advogados, valor da causa.
+          Dados completos de cada fonte exibidos independentemente.
         </p>
 
         {/* Main filters */}
@@ -730,7 +856,7 @@ export function PipelineTab() {
           </div>
         </div>
 
-        {/* Limit */}
+        {/* Limit + batch */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="space-y-1.5 col-span-2 sm:col-span-1">
             <Label className="text-xs text-muted-foreground">Limite de processos</Label>
@@ -764,6 +890,8 @@ export function PipelineTab() {
                 <SelectItem value="5">5</SelectItem>
                 <SelectItem value="8">8 (padrão)</SelectItem>
                 <SelectItem value="10">10 (rápido)</SelectItem>
+                <SelectItem value="20">20 (muito rápido)</SelectItem>
+                <SelectItem value="30">30 (máximo)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -869,7 +997,7 @@ export function PipelineTab() {
                 <Gavel className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                 Etapa 2 — TRF1 Processual
               </span>
-              <span className="text-muted-foreground">partes · advogados · situação</span>
+              <span className="text-muted-foreground">partes · advogados · movimentações</span>
             </Label>
           </div>
           <div className="flex items-center gap-2">
@@ -884,10 +1012,20 @@ export function PipelineTab() {
                 <Globe className="w-3 h-3 text-violet-600 dark:text-violet-400" />
                 Etapa 3 — TRF1 Público / PJe
               </span>
-              <span className="text-muted-foreground">valor da causa · situação PJe</span>
+              <span className="text-muted-foreground">valor da causa · situação PJe · movimentações</span>
             </Label>
           </div>
         </div>
+
+        {/* Warnings */}
+        {config.enrichProcessual && config.batchSize > 5 && (
+          <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 px-3 py-2 rounded-md">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <span>
+              Atenção: lotes maiores que 5 podem sobrecarregar o servidor ao usar TRF1 Processual (Playwright).
+            </span>
+          </div>
+        )}
 
         {config.enrichPublico && (
           <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 px-3 py-2 rounded-md">
@@ -945,7 +1083,7 @@ export function PipelineTab() {
               data-testid="button-pipeline-export"
             >
               <Download className="w-3.5 h-3.5" />
-              Exportar CSV parcial ({rows.length})
+              Exportar CSV ({rows.length})
             </Button>
           )}
           {hasResults && !isRunning && !isPaused && (
@@ -1116,38 +1254,47 @@ export function PipelineTab() {
                 </span>
               )}
             </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => exportCSV(rowsRef.current)}
-              className="h-7 text-xs gap-1.5"
-            >
-              <Download className="w-3 h-3" />
-              CSV ({rows.length})
-            </Button>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground hidden sm:block">
+                Clique em uma linha para ver detalhes completos
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => exportCSV(rowsRef.current)}
+                className="h-7 text-xs gap-1.5"
+              >
+                <Download className="w-3 h-3" />
+                CSV ({rows.length})
+              </Button>
+            </div>
           </div>
           <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead className="bg-muted/30 border-b border-border sticky top-0">
                 <tr>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
+                    <span className="flex items-center gap-1"><Eye className="w-3 h-3" /></span>
+                  </th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Processo</th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
                     <span className="flex items-center gap-1"><Building2 className="w-3 h-3" /> Órgão</span>
                   </th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Classe</th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
-                    <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> Ajuizamento</span>
+                    <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> Ajuiz.</span>
                   </th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Grau</th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
-                    <span className="flex items-center gap-1"><FileText className="w-3 h-3" /> Assuntos</span>
+                    <span className="flex items-center gap-1"><ArrowRightLeft className="w-3 h-3" /> Movs.</span>
                   </th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Última Mov.</th>
                   {config.enrichProcessual && (
                     <>
                       <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
-                        <span className="flex items-center gap-1"><Users className="w-3 h-3 text-emerald-500" /> Partes</span>
+                        <span className="flex items-center gap-1"><Users className="w-3 h-3 text-emerald-500" /> Polo Ativo</span>
                       </th>
+                      <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Polo Passivo</th>
                       <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Advogados</th>
                       <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
                         <span className="flex items-center gap-1"><Info className="w-3 h-3 text-emerald-500" /> Situação</span>
@@ -1160,6 +1307,7 @@ export function PipelineTab() {
                         <span className="flex items-center gap-1"><DollarSign className="w-3 h-3 text-violet-500" /> Valor</span>
                       </th>
                       <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Situação PJe</th>
+                      <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Órgão PJe</th>
                     </>
                   )}
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Status</th>
@@ -1172,6 +1320,7 @@ export function PipelineTab() {
                     row={row}
                     showProcessual={config.enrichProcessual}
                     showPublico={config.enrichPublico}
+                    onSelect={() => setSelectedRow(row)}
                   />
                 ))}
               </tbody>
@@ -1198,11 +1347,318 @@ export function PipelineTab() {
           </div>
         </div>
       )}
+
+      {/* ── Row Detail Dialog ────────────────────────────── */}
+      <RowDetailDialog
+        row={selectedRow}
+        onClose={() => setSelectedRow(null)}
+        showProcessual={config.enrichProcessual}
+        showPublico={config.enrichPublico}
+      />
     </div>
   );
 }
 
+// ─── Row Detail Dialog ────────────────────────────────────────
+
+function RowDetailDialog({
+  row,
+  onClose,
+  showProcessual,
+  showPublico,
+}: {
+  row: PipelineRow | null;
+  onClose: () => void;
+  showProcessual: boolean;
+  showPublico: boolean;
+}) {
+  if (!row) return null;
+
+  return (
+    <Dialog open={!!row} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-sm font-mono">
+            <Hash className="w-4 h-4 text-primary" />
+            {formatCNJ(row.numero_processo)}
+          </DialogTitle>
+        </DialogHeader>
+
+        <Tabs defaultValue="datajud" className="mt-2">
+          <TabsList className="flex flex-wrap h-auto gap-1 bg-muted/60 p-1 rounded-lg">
+            <TabsTrigger value="datajud" className="text-xs gap-1 data-[state=active]:bg-blue-600 data-[state=active]:text-white">
+              <Database className="w-3 h-3" /> DataJud
+              <span className="opacity-60 ml-1">{row.qtd_movimentos}</span>
+            </TabsTrigger>
+            {showProcessual && (
+              <TabsTrigger value="processual" className="text-xs gap-1 data-[state=active]:bg-emerald-600 data-[state=active]:text-white">
+                <Gavel className="w-3 h-3" /> TRF1 Processual
+                <span className="opacity-60 ml-1">{row.processual_status}</span>
+              </TabsTrigger>
+            )}
+            {showPublico && (
+              <TabsTrigger value="publico" className="text-xs gap-1 data-[state=active]:bg-violet-600 data-[state=active]:text-white">
+                <Globe className="w-3 h-3" /> TRF1 Público / PJe
+                <span className="opacity-60 ml-1">{row.publico_status}</span>
+              </TabsTrigger>
+            )}
+          </TabsList>
+
+          {/* DataJud tab */}
+          <TabsContent value="datajud" className="space-y-4 mt-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Database className="w-3.5 h-3.5 text-blue-500" />
+              <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                DataJud · CNJ
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-x-4">
+              <DInfoRow label="Classe" value={row.classe} />
+              <DInfoRow label="Grau" value={row.grau} />
+              <DInfoRow label="Órgão Julgador" value={row.orgao_julgador} />
+              <DInfoRow label="Tribunal" value={row.tribunal} />
+              <DInfoRow label="Ajuizamento" value={row.data_ajuizamento} />
+              <DInfoRow label="Última Atualiz." value={row.ultima_atualizacao} />
+            </div>
+            {row.assuntos && (
+              <div className="text-xs">
+                <span className="text-muted-foreground font-medium">Assuntos: </span>
+                <span>{row.assuntos}</span>
+              </div>
+            )}
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <ArrowRightLeft className="w-3.5 h-3.5 text-muted-foreground" />
+                <span className="text-xs font-medium">
+                  Movimentações DataJud ({row.datajud_movimentos.length})
+                </span>
+              </div>
+              {row.datajud_movimentos.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Nenhuma movimentação</p>
+              ) : (
+                <div className="space-y-0.5 max-h-60 overflow-y-auto border border-border rounded-md">
+                  {row.datajud_movimentos.map((m, i) => (
+                    <div key={i} className="flex gap-3 px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                      <span className="w-20 flex-shrink-0 text-[10px] text-muted-foreground font-mono">
+                        {formatDate(m.data_hora)}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <span className="text-[10px] text-muted-foreground mr-1.5">[{m.codigo}]</span>
+                        <span className="text-xs">{m.nome}</span>
+                        {m.complementos && (
+                          <p className="text-[10px] text-muted-foreground mt-0.5">{m.complementos}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* TRF1 Processual tab */}
+          {showProcessual && (
+            <TabsContent value="processual" className="space-y-4 mt-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Gavel className="w-3.5 h-3.5 text-emerald-500" />
+                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                  TRF1 Processual
+                </span>
+                <EnrichBadge status={row.processual_status} />
+              </div>
+
+              {row.processual_status === "found" ? (
+                <>
+                  <div className="grid grid-cols-2 gap-x-4">
+                    <DInfoRow label="Situação" value={row.situacao_processual} />
+                    <DInfoRow label="Qtd. Partes" value={String(row.qtd_partes)} />
+                    <DInfoRow label="Polo Ativo" value={row.polo_ativo_nome} />
+                    <DInfoRow label="Polo Passivo" value={row.polo_passivo_nome} />
+                  </div>
+
+                  {/* Partes */}
+                  {row.processual_partes.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <Users className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">
+                          Partes ({row.processual_partes.length})
+                        </span>
+                      </div>
+                      <div className="space-y-1 max-h-48 overflow-y-auto border border-border rounded-md">
+                        {row.processual_partes.map((p, i) => (
+                          <div key={i} className="flex gap-2 items-start px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {p.tipo && <Badge variant="outline" className="text-[9px]">{p.tipo}</Badge>}
+                                {p.caracteristica && <Badge variant="secondary" className="text-[9px]">{p.caracteristica}</Badge>}
+                              </div>
+                              <p className="text-xs font-medium mt-0.5">{p.nome}</p>
+                              {p.entidade && <p className="text-[10px] text-muted-foreground">{p.entidade}</p>}
+                              {p.oab && <p className="text-[10px] text-primary">OAB: {p.oab}</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Movimentações */}
+                  {row.processual_movimentacoes.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <ArrowRightLeft className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">
+                          Movimentações TRF1 ({row.processual_movimentacoes.length})
+                        </span>
+                      </div>
+                      <div className="space-y-0.5 max-h-60 overflow-y-auto border border-border rounded-md">
+                        {row.processual_movimentacoes.map((m, i) => (
+                          <div key={i} className="flex gap-3 px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <span className="w-20 flex-shrink-0 text-[10px] text-muted-foreground font-mono">{m.data}</span>
+                            <div className="flex-1 min-w-0">
+                              {m.codigo && <span className="text-[10px] text-muted-foreground mr-1.5">[{m.codigo}]</span>}
+                              <span className="text-xs">{m.descricao}</span>
+                              {m.complemento && <p className="text-[10px] text-muted-foreground mt-0.5">{m.complemento}</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-6 text-muted-foreground">
+                  <Gavel className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                  <p className="text-xs">
+                    {row.processual_status === "not_found"
+                      ? "Processo não encontrado no TRF1 Processual"
+                      : row.processual_status === "error"
+                      ? "Erro ao consultar TRF1 Processual"
+                      : row.processual_status === "loading"
+                      ? "Consultando..."
+                      : "Enriquecimento pendente"}
+                  </p>
+                </div>
+              )}
+            </TabsContent>
+          )}
+
+          {/* TRF1 Público tab */}
+          {showPublico && (
+            <TabsContent value="publico" className="space-y-4 mt-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Globe className="w-3.5 h-3.5 text-violet-500" />
+                <span className="text-xs font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-400">
+                  TRF1 Público · PJe
+                </span>
+                <EnrichBadge status={row.publico_status} />
+              </div>
+
+              {row.publico_status === "found" ? (
+                <>
+                  <div className="grid grid-cols-2 gap-x-4">
+                    <DInfoRow label="Valor da Causa" value={row.valor_causa} />
+                    <DInfoRow label="Situação PJe" value={row.situacao_publico} />
+                    <DInfoRow label="Órgão Julgador" value={row.orgao_julgador_pje} />
+                    <DInfoRow label="Distribuição" value={row.data_distribuicao_pje} />
+                  </div>
+
+                  {/* Partes PJe */}
+                  {row.publico_partes.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <Users className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">
+                          Partes PJe ({row.publico_partes.length})
+                        </span>
+                      </div>
+                      <div className="space-y-0.5 max-h-48 overflow-y-auto border border-border rounded-md">
+                        {row.publico_partes.map((p, i) => (
+                          <div key={i} className="flex gap-2 items-start px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {p.polo && <Badge variant="outline" className="text-[9px]">{p.polo}</Badge>}
+                                {p.tipo_participacao && <Badge variant="secondary" className="text-[9px]">{p.tipo_participacao}</Badge>}
+                              </div>
+                              <p className="text-xs font-medium mt-0.5">{p.nome}</p>
+                              {p.documentos && <p className="text-[10px] text-muted-foreground">Doc: {p.documentos}</p>}
+                              {p.advogados && <p className="text-[10px] text-primary">Adv: {p.advogados}</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Movimentações PJe */}
+                  {row.publico_movimentacoes.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <ArrowRightLeft className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">
+                          Movimentações PJe ({row.publico_movimentacoes.length})
+                        </span>
+                      </div>
+                      <div className="space-y-0.5 max-h-60 overflow-y-auto border border-border rounded-md">
+                        {row.publico_movimentacoes.map((m, i) => (
+                          <div key={i} className="flex gap-3 px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <span className="w-20 flex-shrink-0 text-[10px] text-muted-foreground font-mono">{m.data}</span>
+                            <div className="flex-1 min-w-0">
+                              {m.tipo && <span className="text-[10px] text-primary mr-1.5">[{m.tipo}]</span>}
+                              <span className="text-xs">{m.descricao}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-6 text-muted-foreground">
+                  <Globe className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                  <p className="text-xs">
+                    {row.publico_status === "not_found"
+                      ? "Processo não encontrado na consulta pública PJe"
+                      : row.publico_status === "error"
+                      ? "Erro ao consultar TRF1 Público"
+                      : row.publico_status === "loading"
+                      ? "Consultando..."
+                      : "Enriquecimento pendente"}
+                  </p>
+                </div>
+              )}
+            </TabsContent>
+          )}
+        </Tabs>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Sub-components ───────────────────────────────────────────
+
+function EnrichBadge({ status }: { status: EnrichStatus }) {
+  if (status === "found")
+    return <Badge variant="outline" className="text-[9px] border-emerald-500/30 text-emerald-600">encontrado</Badge>;
+  if (status === "not_found")
+    return <Badge variant="outline" className="text-[9px] text-muted-foreground">não encontrado</Badge>;
+  if (status === "error")
+    return <Badge variant="destructive" className="text-[9px]">erro</Badge>;
+  if (status === "loading")
+    return <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />;
+  return null;
+}
+
+function DInfoRow({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className="py-1.5 border-b border-border/30 last:border-0">
+      <span className="text-[10px] text-muted-foreground block">{label}</span>
+      <span className="text-xs font-medium">{value}</span>
+    </div>
+  );
+}
 
 function StatBadge({
   icon,
@@ -1331,16 +1787,24 @@ function ResultRow({
   row,
   showProcessual,
   showPublico,
+  onSelect,
 }: {
   row: PipelineRow;
   showProcessual: boolean;
   showPublico: boolean;
+  onSelect: () => void;
 }) {
   const isLoading =
     row.processual_status === "loading" || row.publico_status === "loading";
 
   return (
-    <tr className={`hover:bg-muted/20 transition-colors ${isLoading ? "animate-pulse" : ""}`}>
+    <tr
+      className={`hover:bg-primary/5 cursor-pointer transition-colors ${isLoading ? "animate-pulse" : ""}`}
+      onClick={onSelect}
+    >
+      <td className="px-3 py-2.5 text-muted-foreground/50">
+        <Eye className="w-3 h-3" />
+      </td>
       <td className="px-3 py-2.5 font-mono whitespace-nowrap text-[11px]">
         {formatCNJ(row.numero_processo)}
       </td>
@@ -1356,10 +1820,8 @@ function ResultRow({
       <td className="px-3 py-2.5 whitespace-nowrap">
         {row.grau && <Badge variant="outline" className="text-[9px]">{row.grau}</Badge>}
       </td>
-      <td className="px-3 py-2.5 max-w-[160px]">
-        <span className="truncate block text-muted-foreground text-[11px]" title={row.assuntos}>
-          {row.assuntos || <span className="opacity-30">—</span>}
-        </span>
+      <td className="px-3 py-2.5 whitespace-nowrap text-center text-muted-foreground text-[11px]">
+        {row.qtd_movimentos > 0 ? row.qtd_movimentos : "—"}
       </td>
       <td className="px-3 py-2.5 max-w-[140px]">
         <span className="truncate block text-[11px]" title={row.ultima_mov_nome}>
@@ -1372,7 +1834,10 @@ function ResultRow({
       {showProcessual && (
         <>
           <td className="px-3 py-2.5 max-w-[160px]">
-            <EnrichCell status={row.processual_status} value={row.partes} />
+            <EnrichCell status={row.processual_status} value={row.polo_ativo_nome} />
+          </td>
+          <td className="px-3 py-2.5 max-w-[160px]">
+            <EnrichCell status={row.processual_status} value={row.polo_passivo_nome} />
           </td>
           <td className="px-3 py-2.5 max-w-[160px]">
             <EnrichCell status={row.processual_status} value={row.advogados} />
@@ -1397,6 +1862,9 @@ function ResultRow({
             ) : (
               <EnrichCell status={row.publico_status} value="" />
             )}
+          </td>
+          <td className="px-3 py-2.5 max-w-[120px]">
+            <EnrichCell status={row.publico_status} value={row.orgao_julgador_pje} />
           </td>
         </>
       )}
