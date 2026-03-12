@@ -628,7 +628,7 @@ export function PipelineTab() {
     if (config.assuntosCodigos.length > 0) payload.assuntos_codigos = config.assuntosCodigos.map(a => parseInt(a.codigo));
     if (config.assuntosExcluir.length > 0) payload.assuntos_excluir_codigos = config.assuntosExcluir.map(a => parseInt(a.codigo));
     if (config.orgaoJulgadorCodigo.trim()) payload.orgao_julgador_codigo = parseInt(config.orgaoJulgadorCodigo.trim());
-    if (config.grau && config.grau !== "all") payload.grau = config.grau;
+    if (config.grau && config.grau !== "all" && config.grau !== "__all__") payload.grau = config.grau;
     if (config.dataInicio) payload.data_ajuizamento_inicio = config.dataInicio;
     if (config.dataFim) payload.data_ajuizamento_fim = config.dataFim;
     if (config.dataAtualizacaoInicio) payload.data_atualizacao_inicio = config.dataAtualizacaoInicio;
@@ -636,7 +636,7 @@ export function PipelineTab() {
     if (config.movimentoCodigo.trim()) payload.movimento_codigo = parseInt(config.movimentoCodigo.trim());
     if (config.minMovimentos) payload.min_movimentos = parseInt(config.minMovimentos);
     if (config.maxMovimentos) payload.max_movimentos = parseInt(config.maxMovimentos);
-    if (config.nivelSigilo !== "") payload.nivel_sigilo = parseInt(config.nivelSigilo);
+    if (config.nivelSigilo !== "" && config.nivelSigilo !== "__all__") payload.nivel_sigilo = parseInt(config.nivelSigilo);
     if (config.temAssuntos === "yes") payload.tem_assuntos = true;
     else if (config.temAssuntos === "no") payload.tem_assuntos = false;
     if (config.temMovimentos === "yes") payload.tem_movimentos = true;
@@ -721,12 +721,12 @@ export function PipelineTab() {
     if (config.assuntosCodigos.length > 0) count++;
     if (config.assuntosExcluir.length > 0) count++;
     if (config.orgaoJulgadorCodigo) count++;
-    if (config.grau && config.grau !== "all") count++;
+    if (config.grau && config.grau !== "all" && config.grau !== "__all__") count++;
     if (config.dataInicio || config.dataFim) count++;
     if (config.dataAtualizacaoInicio || config.dataAtualizacaoFim) count++;
     if (config.movimentoCodigo) count++;
     if (config.minMovimentos || config.maxMovimentos) count++;
-    if (config.nivelSigilo !== "") count++;
+    if (config.nivelSigilo !== "" && config.nivelSigilo !== "__all__") count++;
     if (config.temAssuntos !== "any") count++;
     if (config.temMovimentos !== "any") count++;
     if (config.sortField !== "dataHoraUltimaAtualizacao" || config.sortOrder !== "desc") count++;
@@ -1100,7 +1100,7 @@ export function PipelineTab() {
                   <Select value={config.nivelSigilo} onValueChange={(v) => upd("nivelSigilo", v)} disabled={isRunning || isPaused}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Qualquer" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">Qualquer</SelectItem>
+                      <SelectItem value="__all__">Qualquer</SelectItem>
                       <SelectItem value="0">Público (0)</SelectItem>
                       <SelectItem value="1">Segredo de Justiça (1)</SelectItem>
                       <SelectItem value="2">Nível 2</SelectItem>

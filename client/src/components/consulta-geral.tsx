@@ -337,7 +337,7 @@ export function ConsultaGeral() {
     if (dataFim) body.data_ajuizamento_fim = dataFim;
     if (dataAtualizacaoInicio) body.data_atualizacao_inicio = dataAtualizacaoInicio;
     if (dataAtualizacaoFim) body.data_atualizacao_fim = dataAtualizacaoFim;
-    if (nivelSigilo !== "") body.nivel_sigilo = parseInt(nivelSigilo);
+    if (nivelSigilo !== "" && nivelSigilo !== "__all__") body.nivel_sigilo = parseInt(nivelSigilo);
     if (temAssuntos === "yes") body.tem_assuntos = true;
     else if (temAssuntos === "no") body.tem_assuntos = false;
     if (temMovimentos === "yes") body.tem_movimentos = true;
@@ -911,7 +911,7 @@ export function ConsultaGeral() {
                       <SelectValue placeholder="Qualquer" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">Qualquer</SelectItem>
+                      <SelectItem value="__all__">Qualquer</SelectItem>
                       <SelectItem value="0">Público (0)</SelectItem>
                       <SelectItem value="1">Segredo de Justiça (1)</SelectItem>
                       <SelectItem value="2">Nível 2</SelectItem>
@@ -1234,7 +1234,7 @@ export function ConsultaGeral() {
     if (ufSelect) count++;
     if (dataInicio || dataFim) count++;
     if (dataAtualizacaoInicio || dataAtualizacaoFim) count++;
-    if (nivelSigilo !== "") count++;
+    if (nivelSigilo !== "" && nivelSigilo !== "__all__") count++;
     if (sortField !== "dataHoraUltimaAtualizacao" || sortOrder !== "desc") count++;
     if (temAssuntos !== "any") count++;
     if (temMovimentos !== "any") count++;
