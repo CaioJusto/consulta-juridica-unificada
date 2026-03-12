@@ -249,25 +249,31 @@ export function UnifiedView() {
         </div>
       )}
 
-      {/* Results */}
-      {!loading && searched && (
+      {/* Results — render each source as soon as it finishes, don't wait for all 3 */}
+      {searched && (
         <div className="space-y-4">
           {/* DataJud result */}
-          {results.datajud.data ? (
+          {results.datajud.loading ? (
+            <SourceSkeleton label="DataJud · CNJ" color="blue" />
+          ) : results.datajud.data ? (
             <DataJudResult data={results.datajud.data} />
           ) : results.datajud.error ? (
             <SourceError label="DataJud · CNJ" icon={Database} message={results.datajud.error} color="text-blue-600 dark:text-blue-400" />
           ) : null}
 
           {/* TRF1 Processual result */}
-          {results.processual.data ? (
+          {results.processual.loading ? (
+            <SourceSkeleton label="TRF1 Processual" color="emerald" />
+          ) : results.processual.data ? (
             <ProcessualResult data={results.processual.data} />
           ) : results.processual.error ? (
             <SourceError label="TRF1 Processual" icon={Gavel} message={results.processual.error} color="text-emerald-600 dark:text-emerald-400" />
           ) : null}
 
           {/* TRF1 Público result */}
-          {results.publico.data ? (
+          {results.publico.loading ? (
+            <SourceSkeleton label="TRF1 Público · PJe" color="violet" />
+          ) : results.publico.data ? (
             <PublicoResult data={results.publico.data} />
           ) : results.publico.error ? (
             <SourceError label="TRF1 Público · PJe" icon={Globe} message={results.publico.error} color="text-violet-600 dark:text-violet-400" />
@@ -509,6 +515,29 @@ function PublicoResult({ data }: { data: TRF1PublicProcess }) {
 }
 
 // ─── Error block ─────────────────────────────────────────────
+
+function SourceSkeleton({ label, color }: { label: string; color: string }) {
+  const borderMap: Record<string, string> = {
+    blue: "border-blue-500/20 bg-blue-500/5",
+    emerald: "border-emerald-500/20 bg-emerald-500/5",
+    violet: "border-violet-500/20 bg-violet-500/5",
+  };
+  const cls = borderMap[color] || "border-border bg-muted/30";
+  return (
+    <div className={`rounded-lg border overflow-hidden ${cls}`}>
+      <div className="px-4 py-2.5 border-b border-inherit flex items-center gap-2">
+        <div className="w-3 h-3 rounded-full bg-current opacity-20 animate-pulse" />
+        <span className="text-xs font-semibold uppercase tracking-wider opacity-50">{label}</span>
+        <Loader2 className="w-3 h-3 ml-auto animate-spin opacity-40" />
+      </div>
+      <div className="p-4 space-y-2">
+        <div className="h-3 bg-muted rounded animate-pulse w-3/4" />
+        <div className="h-3 bg-muted rounded animate-pulse w-1/2" />
+        <div className="h-3 bg-muted rounded animate-pulse w-2/3" />
+      </div>
+    </div>
+  );
+}
 
 function SourceError({
   label,
