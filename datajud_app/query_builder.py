@@ -85,7 +85,23 @@ def build_filter_query(
     return {"query": {"bool": bool_query or {"must": [{"match_all": {}}]}}}
 
 
+def _normalize_date(date_str: str) -> str:
+    """Normalize compact digit dates (e.g. '20231211161834') to ISO format."""
+    if not date_str:
+        return ""
+    date_str = date_str.strip()
+    if date_str.isdigit() and len(date_str) >= 8:
+        y, mo, d = date_str[:4], date_str[4:6], date_str[6:8]
+        h, mi, s = "00", "00", "00"
+        if len(date_str) >= 14:
+            h, mi, s = date_str[8:10], date_str[10:12], date_str[12:14]
+        return f"{y}-{mo}-{d}T{h}:{mi}:{s}"
+    return date_str
+
+
 def _range_clause(field: str, start: str, end: str) -> dict[str, Any] | None:
+    start = _normalize_date(start)
+    end = _normalize_date(end)
     values: dict[str, Any] = {}
     if start:
         values["gte"] = start
@@ -93,4 +109,5 @@ def _range_clause(field: str, start: str, end: str) -> dict[str, Any] | None:
         values["lte"] = end
     if not values:
         return None
+    values["format"] = "strict_date_optional_time||yyyyMMddHHmmss||yyyy-MM-dd"
     return {"range": {field: values}}

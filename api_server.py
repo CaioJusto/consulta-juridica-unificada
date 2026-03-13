@@ -13,8 +13,15 @@ import html as html_mod
 import xml.etree.ElementTree as ET
 import threading
 import uuid
+import logging
+import traceback
 from datetime import datetime
 from typing import Any
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("api_server")
+
+ENABLE_TRF1_SCRAPING = os.environ.get("ENABLE_TRF1_SCRAPING", "true").lower() in ("true", "1", "yes")
 
 # Add paths
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trf1_consulta"))
@@ -103,13 +110,21 @@ def buscar_processo(
     numero: str = Query(..., description="Número do processo"),
     secao: str = Query("TRF1", description="Seção judiciária"),
 ):
+    from fastapi.responses import JSONResponse
     try:
         client = TRF1Client(secao=secao, timeout=30)
         proc = client.buscar_por_numero(numero)
         if proc is None:
             return {"success": False, "error": "Processo não encontrado"}
         return {"success": True, "data": proc.to_dict()}
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError, TimeoutError) as e:
+        logger.warning("TRF1 Processual indisponível: %s", e)
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "error": "Enriquecimento TRF1 indisponível neste ambiente. O serviço pode estar bloqueado ou temporariamente fora do ar."},
+        )
     except Exception as e:
+        logger.error("Erro /api/processo: %s\n%s", e, traceback.format_exc())
         return {"success": False, "error": f"Erro ao consultar: {str(e)}"}
 
 
@@ -139,7 +154,15 @@ def buscar_lista(
             "success": True,
             "data": [asdict(r) for r in resultados],
         }
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError, TimeoutError) as e:
+        from fastapi.responses import JSONResponse
+        logger.warning("TRF1 Processual indisponível: %s", e)
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "error": "Enriquecimento TRF1 indisponível neste ambiente. O serviço pode estar bloqueado ou temporariamente fora do ar."},
+        )
     except Exception as e:
+        logger.error("Erro /api/buscar: %s\n%s", e, traceback.format_exc())
         return {"success": False, "error": f"Erro ao consultar: {str(e)}"}
 
 
@@ -245,6 +268,44 @@ def _parse_datajud_date(raw: str) -> str:
         except Exception:
             pass
     return raw
+
+
+def _normalize_date_for_range(date_str: str) -> str:
+    """Normalize date input for Elasticsearch range queries.
+
+    Some tribunals (e.g. TJSP) store dataAjuizamento as compact digits
+    like '20231211161834' instead of ISO 8601. We accept user input as
+    ISO dates (YYYY-MM-DD) and also emit the compact format so both
+    index formats are covered via a multi-format range query.
+    """
+    if not date_str:
+        return ""
+    date_str = date_str.strip()
+    # Already compact digits — convert to ISO
+    if date_str.isdigit() and len(date_str) >= 8:
+        y, mo, d = date_str[:4], date_str[4:6], date_str[6:8]
+        h, mi, s = "00", "00", "00"
+        if len(date_str) >= 14:
+            h, mi, s = date_str[8:10], date_str[10:12], date_str[12:14]
+        return f"{y}-{mo}-{d}T{h}:{mi}:{s}"
+    # Standard ISO input — keep as-is
+    return date_str
+
+
+def _date_range_filter(field: str, start: str, end: str) -> list[dict]:
+    """Build range filter(s) for a date field, handling both ISO and compact formats."""
+    start = _normalize_date_for_range(start)
+    end = _normalize_date_for_range(end)
+    if not start and not end:
+        return []
+    date_range: dict[str, Any] = {}
+    if start:
+        date_range["gte"] = start
+    if end:
+        date_range["lte"] = end
+    # Use format param so ES can parse both ISO and compact yyyyMMddHHmmss
+    date_range["format"] = "strict_date_optional_time||yyyyMMddHHmmss||yyyy-MM-dd"
+    return [{"range": {field: date_range}}]
 
 
 def _format_grau(raw: str) -> str:
@@ -460,23 +521,19 @@ def datajud_buscar(payload: dict = Body(...)):
                 }
             })
 
-        # Date ranges — ajuizamento
-        date_range = {}
-        if payload.get("data_ajuizamento_inicio"):
-            date_range["gte"] = payload["data_ajuizamento_inicio"]
-        if payload.get("data_ajuizamento_fim"):
-            date_range["lte"] = payload["data_ajuizamento_fim"]
-        if date_range:
-            filters.append({"range": {"dataAjuizamento": date_range}})
+        # Date ranges — ajuizamento (normalized for compact/ISO formats)
+        filters.extend(_date_range_filter(
+            "dataAjuizamento",
+            payload.get("data_ajuizamento_inicio", ""),
+            payload.get("data_ajuizamento_fim", ""),
+        ))
 
         # Date ranges — atualização
-        upd_range = {}
-        if payload.get("data_atualizacao_inicio"):
-            upd_range["gte"] = payload["data_atualizacao_inicio"]
-        if payload.get("data_atualizacao_fim"):
-            upd_range["lte"] = payload["data_atualizacao_fim"]
-        if upd_range:
-            filters.append({"range": {"dataHoraUltimaAtualizacao": upd_range}})
+        filters.extend(_date_range_filter(
+            "dataHoraUltimaAtualizacao",
+            payload.get("data_atualizacao_inicio", ""),
+            payload.get("data_atualizacao_fim", ""),
+        ))
 
         # Construir bool query
         bool_query: dict[str, Any] = {}
@@ -757,6 +814,12 @@ def trf1_publico_buscar(
     Consulta pública TRF1 1ª instância.
     Usa Playwright para navegar no formulário do PJe.
     """
+    from fastapi.responses import JSONResponse
+    if not ENABLE_TRF1_SCRAPING:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "error": "Enriquecimento TRF1 indisponível neste ambiente (ENABLE_TRF1_SCRAPING=false)."},
+        )
     try:
         # Verificar se algum campo foi preenchido
         if not any([numero.strip(), nome_parte.strip(), documento.strip(), nome_advogado.strip(), oab.strip()]):
@@ -954,21 +1017,17 @@ def _run_pipeline(job_id: str) -> None:
                 params["maxMov"] = max_mov
             filters.append({"script": {"script": {"source": " && ".join(script_parts), "params": params}}})
 
-        date_range: dict = {}
-        if config.get("data_ajuizamento_inicio"):
-            date_range["gte"] = config["data_ajuizamento_inicio"]
-        if config.get("data_ajuizamento_fim"):
-            date_range["lte"] = config["data_ajuizamento_fim"]
-        if date_range:
-            filters.append({"range": {"dataAjuizamento": date_range}})
-
-        upd_range: dict = {}
-        if config.get("data_atualizacao_inicio"):
-            upd_range["gte"] = config["data_atualizacao_inicio"]
-        if config.get("data_atualizacao_fim"):
-            upd_range["lte"] = config["data_atualizacao_fim"]
-        if upd_range:
-            filters.append({"range": {"dataHoraUltimaAtualizacao": upd_range}})
+        # Date ranges — normalized for compact/ISO formats
+        filters.extend(_date_range_filter(
+            "dataAjuizamento",
+            config.get("data_ajuizamento_inicio", ""),
+            config.get("data_ajuizamento_fim", ""),
+        ))
+        filters.extend(_date_range_filter(
+            "dataHoraUltimaAtualizacao",
+            config.get("data_atualizacao_inicio", ""),
+            config.get("data_atualizacao_fim", ""),
+        ))
 
         bool_query: dict[str, Any] = {}
         if must:
@@ -1144,6 +1203,8 @@ def _run_pipeline(job_id: str) -> None:
             batch_size = max(1, int(config.get("batch_size", 8)) // 2)
 
             try:
+                if not ENABLE_TRF1_SCRAPING:
+                    raise ImportError("TRF1 scraping disabled via ENABLE_TRF1_SCRAPING")
                 from datajud_app.trf1_public import TRF1PublicSearchParams, search_trf1_public_bundle
                 publico_available = True
             except ImportError:
@@ -1188,6 +1249,7 @@ def _run_pipeline(job_id: str) -> None:
         _save_jobs()
 
     except Exception as e:
+        logger.error("Pipeline %s crashed: %s\n%s", job_id, e, traceback.format_exc())
         job["status"] = "error"
         job["error"] = str(e)
         _save_jobs()
@@ -1365,4 +1427,9 @@ def pipeline_list_jobs():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    try:
+        logger.info("Starting API server on port 8000")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    except Exception as e:
+        logger.critical("API server crashed: %s\n%s", e, traceback.format_exc())
+        sys.exit(1)

@@ -94,8 +94,11 @@ export function TRF1PublicSearch() {
       } else {
         setState({ loading: false, error: json.error || "Erro na busca", total: 0, processos: [] });
       }
-    } catch {
-      setState({ loading: false, error: "Erro de conexão com o servidor", total: 0, processos: [] });
+    } catch (err: any) {
+      const msg = err?.message?.includes("503")
+        ? "Enriquecimento TRF1 indisponível neste ambiente. O scraper Playwright pode estar bloqueado neste servidor."
+        : "Erro de conexão com o servidor";
+      setState({ loading: false, error: msg, total: 0, processos: [] });
     }
   }
 

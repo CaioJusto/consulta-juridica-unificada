@@ -6,8 +6,25 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
-  // Proxy all /api/* requests to the Python FastAPI backend on port 8000
   const PYTHON_API = process.env.PYTHON_API_URL || "http://127.0.0.1:8000";
+
+  // Health check — verifies Python backend is alive
+  app.get("/health", async (_req, res) => {
+    try {
+      const response = await fetch(`${PYTHON_API}/api/health`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (response.ok) {
+        res.json({ ok: true, python: true });
+      } else {
+        res.status(503).json({ ok: false, python: false, error: "Python backend unhealthy" });
+      }
+    } catch {
+      res.status(503).json({ ok: false, python: false, error: "Python backend unreachable" });
+    }
+  });
+
+  // Proxy all /api/* requests to the Python FastAPI backend on port 8000
   app.use("/api", async (req, res) => {
     try {
       const url = new URL(req.url, PYTHON_API);
@@ -43,9 +60,9 @@ export async function registerRoutes(
       }
     } catch (err: any) {
       console.error("Proxy error:", err.message);
-      res.status(422).json({
+      res.status(502).json({
         success: false,
-        error: "Erro ao comunicar com o serviço de consulta. Tente novamente.",
+        error: "Backend Python indisponível. O serviço será reiniciado automaticamente — tente novamente em alguns segundos.",
       });
     }
   });

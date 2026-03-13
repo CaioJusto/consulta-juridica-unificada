@@ -68,6 +68,7 @@ interface SearchState {
   processos: DataJudProcesso[];
   searchAfter: any[] | null;
   hasMore: boolean;
+  searched: boolean;
 }
 
 export function DataJudSearch() {
@@ -128,6 +129,7 @@ export function DataJudSearch() {
     processos: [],
     searchAfter: null,
     hasMore: false,
+    searched: false,
   });
 
   // Carregar tribunais
@@ -143,7 +145,7 @@ export function DataJudSearch() {
   async function handleSearch(e?: React.FormEvent, loadMore = false) {
     if (e) e.preventDefault();
     if (!loadMore) {
-      setState({ loading: true, error: "", total: 0, processos: [], searchAfter: null, hasMore: false });
+      setState({ loading: true, error: "", total: 0, processos: [], searchAfter: null, hasMore: false, searched: false });
     } else {
       setState((s) => ({ ...s, loading: true, error: "" }));
     }
@@ -173,6 +175,7 @@ export function DataJudSearch() {
           processos: loadMore ? [...s.processos, ...newProcessos] : newProcessos,
           searchAfter: json.data.search_after,
           hasMore: newProcessos.length >= 20,
+          searched: true,
         }));
       } else {
         setState((s) => ({ ...s, loading: false, error: json.error || "Erro na busca" }));
@@ -405,14 +408,36 @@ export function DataJudSearch() {
         </div>
       )}
 
-      {/* Empty state */}
-      {!state.loading && state.total === 0 && !state.error && state.processos.length === 0 && (
+      {/* Empty state — no search performed yet */}
+      {!state.loading && state.total === 0 && !state.error && state.processos.length === 0 && !state.searched && (
         <div className="text-center py-16 text-muted-foreground" data-testid="datajud-empty">
           <Database className="w-12 h-12 mx-auto mb-4 opacity-20" />
           <p className="text-sm">API pública do DataJud — base de dados do CNJ.</p>
           <p className="text-xs mt-1 opacity-70">
             Busque por número do processo, classe, assunto ou período.
           </p>
+        </div>
+      )}
+
+      {/* Zero results after search */}
+      {!state.loading && state.total === 0 && !state.error && state.processos.length === 0 && state.searched && (
+        <div className="mt-6 p-4 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-800 dark:text-amber-300" data-testid="datajud-zero-results">
+          <div className="flex items-start gap-3">
+            <Info className="w-5 h-5 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-medium">Nenhum processo encontrado</p>
+              <p className="text-xs mt-1 opacity-80">
+                O índice DataJud para este tribunal pode estar temporariamente vazio ou em manutenção no CNJ.
+                Verifique os filtros utilizados e tente novamente mais tarde.
+              </p>
+              {tribunal.includes("trf1") && (
+                <p className="text-xs mt-1 opacity-80">
+                  O índice TRF1 no DataJud pode apresentar indisponibilidade temporária.
+                  Para consultas diretas, utilize a aba "Processual" ou "Público".
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

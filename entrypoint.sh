@@ -1,9 +1,15 @@
 #!/bin/bash
 set -e
 
-# Start Python API in background
-python3 api_server.py &
-PYTHON_PID=$!
+# Start Python API in background with automatic restart loop
+(
+  while true; do
+    echo "[entrypoint] Starting Python API..."
+    python3 api_server.py || true
+    echo "[entrypoint] Python API exited, restarting in 2s..."
+    sleep 2
+  done
+) &
 
 # Wait for Python to be ready
 for i in $(seq 1 30); do
