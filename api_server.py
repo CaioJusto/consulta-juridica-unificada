@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("api_server")
 
 ENABLE_TRF1_SCRAPING = os.environ.get("ENABLE_TRF1_SCRAPING", "true").lower() in ("true", "1", "yes")
+TRF1_PROXY_URL = os.environ.get("TRF1_PROXY_URL", "").strip()
 
 # Add paths
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "trf1_consulta"))
@@ -99,6 +100,15 @@ TRIBUNAL_BY_ALIAS = {t["alias"]: t["label"] for t in TRIBUNAL_OPTIONS}
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/config/status")
+def config_status():
+    return {
+        "trf1_scraping_enabled": ENABLE_TRF1_SCRAPING,
+        "trf1_proxy_configured": bool(TRF1_PROXY_URL),
+        "trf1_proxy_url": TRF1_PROXY_URL[:20] + "..." if len(TRF1_PROXY_URL) > 20 else TRF1_PROXY_URL or None,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1429,6 +1439,7 @@ if __name__ == "__main__":
     import uvicorn
     try:
         logger.info("Starting API server on port 8000")
+        logger.info("TRF1 scraping: %s | proxy: %s", ENABLE_TRF1_SCRAPING, TRF1_PROXY_URL or "none")
         uvicorn.run(app, host="0.0.0.0", port=8000)
     except Exception as e:
         logger.critical("API server crashed: %s\n%s", e, traceback.format_exc())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -143,7 +144,11 @@ def search_trf1_public_bundle(
     _report(0, max_details + 2, "Abrindo o portal do TRF1...")
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        _launch_args: dict[str, Any] = {"headless": True}
+        _proxy_url = os.environ.get("TRF1_PROXY_URL", "").strip()
+        if _proxy_url:
+            _launch_args["proxy"] = {"server": _proxy_url}
+        browser = playwright.chromium.launch(**_launch_args)
         context = browser.new_context(locale="pt-BR")
         search_page = context.new_page()
         try:
