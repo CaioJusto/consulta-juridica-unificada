@@ -650,7 +650,7 @@ def _process_single_trf1_row(row: dict[str, Any], source_label: str, _retry: int
             _open_trf1_search_page(page)
             page.locator(TRF1_PROCESS_INPUT_SELECTOR).fill(formatted_number)
             page.get_by_role("button", name="Pesquisar").click()
-            page.wait_for_load_state("networkidle", timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=8000)
 
             html = page.content()
             if "0 resultados encontrados" in html:
@@ -671,7 +671,7 @@ def _process_single_trf1_row(row: dict[str, Any], source_label: str, _retry: int
                 }
 
             detail_url = urljoin(TRF1_SEARCH_URL, detail_match.group(0))
-            page.goto(detail_url, wait_until="networkidle", timeout=60000)
+            page.goto(detail_url, wait_until="networkidle", timeout=20000)
             detail_html = page.content()
 
             extracted = _parse_trf1_detail(
