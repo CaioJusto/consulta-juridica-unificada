@@ -751,6 +751,36 @@ def trf1_publico_buscar(
 
 jobs: dict[str, dict] = {}  # job_id -> job state
 
+# ── Persistent job state (survives server restarts) ──────────────────────────
+import json as _json
+import atexit as _atexit
+JOBS_FILE = "/tmp/pipeline_jobs.json"
+
+def _load_jobs() -> None:
+    """Load completed/done jobs from disk on startup."""
+    try:
+        if os.path.exists(JOBS_FILE):
+            with open(JOBS_FILE) as f:
+                saved = _json.load(f)
+            for jid, jdata in saved.items():
+                # Only restore done/error jobs (running ones are dead)
+                if jdata.get("status") in ("done", "error", "stopped"):
+                    jobs[jid] = jdata
+    except Exception:
+        pass
+
+def _save_jobs() -> None:
+    """Persist finished jobs to disk."""
+    try:
+        to_save = {jid: j for jid, j in jobs.items() if j.get("status") in ("done", "error", "stopped")}
+        with open(JOBS_FILE, "w") as f:
+            _json.dump(to_save, f, default=str)
+    except Exception:
+        pass
+
+_load_jobs()
+_atexit.register(_save_jobs)
+
 
 def _run_pipeline(job_id: str) -> None:
     """Background thread that executes the full pipeline (DataJud + enrichments)."""
@@ -1040,10 +1070,12 @@ def _run_pipeline(job_id: str) -> None:
 
         job["status"] = "done"
         job["progress"]["stage"] = "done"
+        _save_jobs()
 
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        _save_jobs()
 
 
 @app.post("/api/pipeline/start")
