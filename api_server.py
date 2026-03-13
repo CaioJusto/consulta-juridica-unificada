@@ -946,38 +946,31 @@ def _run_pipeline(job_id: str) -> None:
 
         if enrich_processual:
             job["progress"]["stage"] = "enriching"
-            # Call the existing /api/processo HTTP endpoint (avoids spawning multiple Playwright browsers)
-            # Use a semaphore to limit concurrency to 3 parallel browser sessions
-            import requests as _requests
+            # Call TRF1Client directly from pipeline thread (plain Python thread, no asyncio context)
+            # Limit to 2 concurrent Playwright browsers via semaphore to avoid memory pressure
             import concurrent.futures as cf
-            ENRICH_WORKERS = 3
-            sem = threading.Semaphore(ENRICH_WORKERS)
+            PLAYWRIGHT_SEM = threading.Semaphore(2)
             completed = [0]
             lock = threading.Lock()
 
             def enrich_row_processual(row):
-                with sem:
+                with PLAYWRIGHT_SEM:
                     try:
-                        num = row["numero_processo"]
-                        resp = _requests.get(
-                            "http://localhost:8000/api/processo",
-                            params={"numero": num, "secao": "TRF1"},
-                            timeout=60,
-                        )
-                        data = resp.json()
-                        if data.get("success") and data.get("data"):
-                            d = data["data"]
-                            row["polo_ativo_nome"] = d.get("polo_ativo", "")
-                            row["polo_ativo_cpf"] = ""
-                            row["polo_passivo_nome"] = d.get("polo_passivo", "")
-                            row["polo_passivo_cnpj"] = ""
-                            # collect advogados from partes list
-                            advs = []
-                            for p in d.get("partes", []):
-                                advs.extend(p.get("advogados", []))
+                        digits = re.sub(r"\D", "", row["numero_processo"])
+                        proc = TRF1Client(secao="TRF1", timeout=45).buscar_por_numero(digits)
+                        if proc:
+                            row["polo_ativo_nome"] = proc.polo_ativo or ""
+                            row["polo_passivo_nome"] = proc.polo_passivo or ""
+                            advs: list[str] = []
+                            for p in (proc.partes or []):
+                                if isinstance(p, dict):
+                                    advs.extend(p.get("advogados", []))
+                                elif hasattr(p, "advogados"):
+                                    advs.extend(p.advogados or [])
                             row["advogados"] = "; ".join(advs[:6])
-                            row["situacao_processual"] = d.get("situacao", "")
-                            row["valor_causa"] = d.get("valor_causa", "") or row.get("valor_causa", "")
+                            row["situacao_processual"] = proc.situacao or ""
+                            if proc.valor_causa:
+                                row["valor_causa"] = proc.valor_causa
                     except Exception:
                         with lock:
                             job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
@@ -986,7 +979,7 @@ def _run_pipeline(job_id: str) -> None:
                             completed[0] += 1
                             job["progress"]["enriched_processual"] = completed[0]
 
-            with cf.ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
+            with cf.ThreadPoolExecutor(max_workers=2) as pool:
                 futures = []
                 for row in collected_rows:
                     if job["status"] == "stopped":

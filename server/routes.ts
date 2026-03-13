@@ -28,8 +28,19 @@ export async function registerRoutes(
       }
 
       const response = await fetch(url.toString(), fetchOptions);
-      const data = await response.json();
-      res.status(response.status).json(data);
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/csv") || contentType.includes("octet-stream")) {
+        // Forward binary/CSV responses directly (e.g. pipeline export)
+        const buffer = await response.arrayBuffer();
+        const disposition = response.headers.get("content-disposition") || "";
+        res.status(response.status)
+          .header("Content-Type", contentType)
+          .header("Content-Disposition", disposition)
+          .send(Buffer.from(buffer));
+      } else {
+        const data = await response.json();
+        res.status(response.status).json(data);
+      }
     } catch (err: any) {
       console.error("Proxy error:", err.message);
       res.status(422).json({
