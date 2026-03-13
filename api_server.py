@@ -946,19 +946,17 @@ def _run_pipeline(job_id: str) -> None:
 
         if enrich_processual:
             job["progress"]["stage"] = "enriching"
-            batch_size = int(config.get("batch_size", 8))
+            batch_size = max(1, min(int(config.get("batch_size", 4)), 6))  # cap at 6 parallel Playwright
+            completed = [0]
+            lock = threading.Lock()
 
-            for i, row in enumerate(collected_rows):
-                if job["status"] == "stopped":
-                    return
-                while job["status"] == "paused":
-                    time.sleep(0.5)
-
+            def enrich_row_processual(row):
                 try:
                     digits = re.sub(r"\D", "", row["numero_processo"])
-                    client = TRF1Client(secao="TRF1", timeout=50)
-                    proc = client.buscar_por_numero(digits)
-
+                    import concurrent.futures as _cf
+                    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                        future = _ex.submit(lambda: TRF1Client(secao="TRF1", timeout=45).buscar_por_numero(digits))
+                        proc = future.result(timeout=50)
                     if proc:
                         advogados = [p for p in proc.partes if p.oab]
                         partes = [p for p in proc.partes if not p.oab]
@@ -966,7 +964,6 @@ def _run_pipeline(job_id: str) -> None:
                         polo_passivo = [p for p in partes if "PASSIVO" in (p.tipo or "").upper() or "PASSIVO" in (p.caracteristica or "").upper()]
                         ativos = polo_ativo if polo_ativo else partes[:max(1, len(partes) // 2)]
                         passivos = polo_passivo if polo_passivo else partes[max(1, len(partes) // 2):]
-
                         row["polo_ativo_nome"] = "; ".join(p.nome for p in ativos[:3] if p.nome)
                         row["polo_ativo_cpf"] = next((p.entidade for p in ativos if p.entidade), "")
                         row["polo_passivo_nome"] = "; ".join(p.nome for p in passivos[:3] if p.nome)
@@ -977,12 +974,23 @@ def _run_pipeline(job_id: str) -> None:
                         )
                         row["situacao_processual"] = proc.situacao or ""
                 except Exception:
-                    job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
+                    with lock:
+                        job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
+                finally:
+                    with lock:
+                        completed[0] += 1
+                        job["progress"]["enriched_processual"] = completed[0]
 
-                job["progress"]["enriched_processual"] = i + 1
-                # Rate limiting for batched requests
-                if (i + 1) % batch_size == 0:
-                    time.sleep(0.2)
+            import concurrent.futures as cf
+            with cf.ThreadPoolExecutor(max_workers=batch_size) as pool:
+                futures = []
+                for row in collected_rows:
+                    if job["status"] == "stopped":
+                        break
+                    while job["status"] == "paused":
+                        time.sleep(0.5)
+                    futures.append(pool.submit(enrich_row_processual, row))
+                cf.wait(futures)
 
         if job["status"] == "stopped":
             return
