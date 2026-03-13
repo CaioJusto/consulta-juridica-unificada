@@ -159,6 +159,73 @@ def _datajud_search(tribunal_alias: str, body: dict, api_key: str = DATAJUD_API_
     return resp.json()
 
 
+def _extract_total_hits(raw: dict) -> int:
+    """Compat: hits.total can be object ({value}) or int depending on ES version."""
+    total = raw.get("hits", {}).get("total", 0)
+    if isinstance(total, dict):
+        return int(total.get("value", 0) or 0)
+    try:
+        return int(total or 0)
+    except Exception:
+        return 0
+
+
+def _safe_int(value: Any) -> int | None:
+    """Best-effort int parser; returns None for blank/invalid values."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value == value else None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+
+def _numero_processo_clauses(raw_numero: str) -> list[dict]:
+    """
+    Build robust clauses for process number matching.
+    DataJud indexes can store numeroProcesso formatted and/or normalized.
+    """
+    numero = (raw_numero or "").strip()
+    if not numero:
+        return []
+
+    digits = re.sub(r"\D", "", numero)
+    candidates: list[str] = []
+    if numero:
+        candidates.append(numero)
+    if digits and digits != numero:
+        candidates.append(digits)
+    if digits and len(digits) == 20:
+        formatted = (
+            f"{digits[:7]}-{digits[7:9]}.{digits[9:13]}."
+            f"{digits[13:14]}.{digits[14:16]}.{digits[16:20]}"
+        )
+        if formatted not in candidates:
+            candidates.append(formatted)
+
+    should: list[dict] = []
+    for cand in candidates:
+        should.append({"term": {"numeroProcesso.keyword": cand}})
+        should.append({"term": {"numeroProcesso": cand}})
+        should.append({"match": {"numeroProcesso": cand}})
+
+    return [{
+        "bool": {
+            "should": should,
+            "minimum_should_match": 1,
+        }
+    }]
+
+
 def _parse_datajud_date(raw: str) -> str:
     """Parse DataJud dates which come in various formats."""
     if not raw:
@@ -298,51 +365,62 @@ def datajud_buscar(payload: dict = Body(...)):
         must_not: list[dict] = []
 
         # Número do processo
-        numero = payload.get("numero_processo", "").strip()
-        if numero:
-            numero_limpo = re.sub(r"[.\-/\s]", "", numero)
-            must.append({"match": {"numeroProcesso": numero_limpo}})
+        numero = (payload.get("numero_processo") or "").strip()
+        must.extend(_numero_processo_clauses(numero))
 
         # Classe
-        if payload.get("classe_codigo"):
-            must.append({"match": {"classe.codigo": int(payload["classe_codigo"])}})
+        classe_codigo = _safe_int(payload.get("classe_codigo"))
+        if classe_codigo is not None:
+            must.append({"term": {"classe.codigo": classe_codigo}})
 
         # Assuntos (múltiplos — AND)
         assuntos_codigos = payload.get("assuntos_codigos") or []
         if assuntos_codigos:
             for code in assuntos_codigos:
-                must.append({"match": {"assuntos.codigo": int(code)}})
-        elif payload.get("assunto_codigo"):
-            must.append({"match": {"assuntos.codigo": int(payload["assunto_codigo"])}})
+                code_int = _safe_int(code)
+                if code_int is not None:
+                    must.append({"term": {"assuntos.codigo": code_int}})
+        else:
+            assunto_codigo = _safe_int(payload.get("assunto_codigo"))
+            if assunto_codigo is not None:
+                must.append({"term": {"assuntos.codigo": assunto_codigo}})
 
         # Assuntos excluídos
         assuntos_excluir = payload.get("assuntos_excluir_codigos") or []
         for code in assuntos_excluir:
-            must_not.append({"match": {"assuntos.codigo": int(code)}})
+            code_int = _safe_int(code)
+            if code_int is not None:
+                must_not.append({"term": {"assuntos.codigo": code_int}})
 
         # Movimentação
-        if payload.get("movimento_codigo"):
-            must.append({"match": {"movimentos.codigo": int(payload["movimento_codigo"])}})
+        movimento_codigo = _safe_int(payload.get("movimento_codigo"))
+        if movimento_codigo is not None:
+            must.append({"term": {"movimentos.codigo": movimento_codigo}})
 
         # Órgão julgador
-        if payload.get("orgao_julgador_codigo"):
-            must.append({"match": {"orgaoJulgador.codigo": int(payload["orgao_julgador_codigo"])}})
+        orgao_julgador_codigo = _safe_int(payload.get("orgao_julgador_codigo"))
+        if orgao_julgador_codigo is not None:
+            must.append({"term": {"orgaoJulgador.codigo": orgao_julgador_codigo}})
 
         # Grau
-        if payload.get("grau"):
-            must.append({"match": {"grau": payload["grau"]}})
+        grau = (payload.get("grau") or "").strip()
+        if grau and grau.lower() != "all" and grau != "__all__":
+            must.append({"term": {"grau.keyword": grau}})
 
         # Sistema
-        if payload.get("sistema_codigo"):
-            must.append({"match": {"sistema.codigo": int(payload["sistema_codigo"])}})
+        sistema_codigo = _safe_int(payload.get("sistema_codigo"))
+        if sistema_codigo is not None:
+            must.append({"term": {"sistema.codigo": sistema_codigo}})
 
         # Formato
-        if payload.get("formato_codigo"):
-            must.append({"match": {"formato.codigo": int(payload["formato_codigo"])}})
+        formato_codigo = _safe_int(payload.get("formato_codigo"))
+        if formato_codigo is not None:
+            must.append({"term": {"formato.codigo": formato_codigo}})
 
         # Nível de sigilo
-        if payload.get("nivel_sigilo") is not None and payload["nivel_sigilo"] != "":
-            must.append({"match": {"nivelSigilo": int(payload["nivel_sigilo"])}})
+        nivel_sigilo = _safe_int(payload.get("nivel_sigilo"))
+        if nivel_sigilo is not None:
+            must.append({"term": {"nivelSigilo": nivel_sigilo}})
 
         # Filtros de presença (exists / not exists)
         tem_assuntos = payload.get("tem_assuntos")
@@ -358,17 +436,21 @@ def datajud_buscar(payload: dict = Body(...)):
             must_not.append({"exists": {"field": "movimentos"}})
 
         # Quantidade de movimentações (via script)
-        min_mov = payload.get("min_movimentos")
-        max_mov = payload.get("max_movimentos")
+        min_mov = _safe_int(payload.get("min_movimentos"))
+        max_mov = _safe_int(payload.get("max_movimentos"))
         if min_mov is not None or max_mov is not None:
             script_parts = []
             params = {}
             if min_mov is not None:
-                script_parts.append("doc['movimentos.codigo'].size() >= params.minMov")
-                params["minMov"] = int(min_mov)
+                script_parts.append(
+                    "(doc.containsKey('movimentos.codigo') ? doc['movimentos.codigo'].size() : 0) >= params.minMov"
+                )
+                params["minMov"] = min_mov
             if max_mov is not None:
-                script_parts.append("doc['movimentos.codigo'].size() <= params.maxMov")
-                params["maxMov"] = int(max_mov)
+                script_parts.append(
+                    "(doc.containsKey('movimentos.codigo') ? doc['movimentos.codigo'].size() : 0) <= params.maxMov"
+                )
+                params["maxMov"] = max_mov
             filters.append({
                 "script": {
                     "script": {
@@ -404,15 +486,18 @@ def datajud_buscar(payload: dict = Body(...)):
             bool_query["filter"] = filters
         if must_not:
             bool_query["must_not"] = must_not
+        query_clause: dict[str, Any]
         if not bool_query:
-            bool_query["must"] = [{"match_all": {}}]
+            query_clause = {"match_all": {}}
+        else:
+            query_clause = {"bool": bool_query}
 
         # Sort
         sort_field = payload.get("sort_field", "dataHoraUltimaAtualizacao")
         sort_order = payload.get("sort_order", "desc")
         body: dict[str, Any] = {
             "size": page_size,
-            "query": {"bool": bool_query},
+            "query": query_clause,
             "sort": [{sort_field: {"order": sort_order}}],
         }
 
@@ -422,7 +507,7 @@ def datajud_buscar(payload: dict = Body(...)):
             body["search_after"] = search_after
 
         raw = _datajud_search(tribunal_alias, body)
-        total = raw.get("hits", {}).get("total", {}).get("value", 0)
+        total = _extract_total_hits(raw)
         processos = _parse_datajud_hits(raw, tribunal_alias)
 
         # Extrair search_after do último hit
@@ -796,7 +881,7 @@ def _run_pipeline(job_id: str) -> None:
         tribunal_alias = (config.get("tribunal_alias") or "api_publica_trf1").strip()
         limit_raw = config.get("limit", "1000")
         limit_num = float("inf") if limit_raw == "all" else int(limit_raw or 1000)
-        page_size = min(200, int(limit_num) if limit_num != float("inf") else 200)
+        page_size = min(100, int(limit_num) if limit_num != float("inf") else 100)
 
         sort_field = config.get("sort_field", "dataHoraUltimaAtualizacao")
         sort_order = config.get("sort_order", "desc")
@@ -807,31 +892,38 @@ def _run_pipeline(job_id: str) -> None:
         must_not: list[dict] = []
 
         numero = (config.get("numero_processo") or "").strip()
-        if numero:
-            numero_limpo = re.sub(r"[.\-/\s]", "", numero)
-            must.append({"match": {"numeroProcesso": numero_limpo}})
+        must.extend(_numero_processo_clauses(numero))
 
-        if config.get("classe_codigo"):
-            must.append({"match": {"classe.codigo": int(config["classe_codigo"])}})
+        classe_codigo = _safe_int(config.get("classe_codigo"))
+        if classe_codigo is not None:
+            must.append({"term": {"classe.codigo": classe_codigo}})
 
         assuntos_codigos = config.get("assuntos_codigos") or []
         for code in assuntos_codigos:
-            must.append({"match": {"assuntos.codigo": int(code)}})
+            code_int = _safe_int(code)
+            if code_int is not None:
+                must.append({"term": {"assuntos.codigo": code_int}})
 
         for code in (config.get("assuntos_excluir_codigos") or []):
-            must_not.append({"match": {"assuntos.codigo": int(code)}})
+            code_int = _safe_int(code)
+            if code_int is not None:
+                must_not.append({"term": {"assuntos.codigo": code_int}})
 
-        if config.get("movimento_codigo"):
-            must.append({"match": {"movimentos.codigo": int(config["movimento_codigo"])}})
+        movimento_codigo = _safe_int(config.get("movimento_codigo"))
+        if movimento_codigo is not None:
+            must.append({"term": {"movimentos.codigo": movimento_codigo}})
 
-        if config.get("orgao_julgador_codigo"):
-            must.append({"match": {"orgaoJulgador.codigo": int(config["orgao_julgador_codigo"])}})
+        orgao_julgador_codigo = _safe_int(config.get("orgao_julgador_codigo"))
+        if orgao_julgador_codigo is not None:
+            must.append({"term": {"orgaoJulgador.codigo": orgao_julgador_codigo}})
 
-        if config.get("grau"):
-            must.append({"match": {"grau": config["grau"]}})
+        grau = (config.get("grau") or "").strip()
+        if grau and grau.lower() != "all" and grau != "__all__":
+            must.append({"term": {"grau.keyword": grau}})
 
-        if config.get("nivel_sigilo") is not None and config["nivel_sigilo"] != "":
-            must.append({"match": {"nivelSigilo": int(config["nivel_sigilo"])}})
+        nivel_sigilo = _safe_int(config.get("nivel_sigilo"))
+        if nivel_sigilo is not None:
+            must.append({"term": {"nivelSigilo": nivel_sigilo}})
 
         tem_assuntos = config.get("tem_assuntos")
         if tem_assuntos is True:
@@ -845,17 +937,21 @@ def _run_pipeline(job_id: str) -> None:
         elif tem_movimentos is False:
             must_not.append({"exists": {"field": "movimentos"}})
 
-        min_mov = config.get("min_movimentos")
-        max_mov = config.get("max_movimentos")
+        min_mov = _safe_int(config.get("min_movimentos"))
+        max_mov = _safe_int(config.get("max_movimentos"))
         if min_mov is not None or max_mov is not None:
             script_parts = []
             params: dict = {}
             if min_mov is not None:
-                script_parts.append("doc['movimentos.codigo'].size() >= params.minMov")
-                params["minMov"] = int(min_mov)
+                script_parts.append(
+                    "(doc.containsKey('movimentos.codigo') ? doc['movimentos.codigo'].size() : 0) >= params.minMov"
+                )
+                params["minMov"] = min_mov
             if max_mov is not None:
-                script_parts.append("doc['movimentos.codigo'].size() <= params.maxMov")
-                params["maxMov"] = int(max_mov)
+                script_parts.append(
+                    "(doc.containsKey('movimentos.codigo') ? doc['movimentos.codigo'].size() : 0) <= params.maxMov"
+                )
+                params["maxMov"] = max_mov
             filters.append({"script": {"script": {"source": " && ".join(script_parts), "params": params}}})
 
         date_range: dict = {}
@@ -881,8 +977,11 @@ def _run_pipeline(job_id: str) -> None:
             bool_query["filter"] = filters
         if must_not:
             bool_query["must_not"] = must_not
+        query_clause: dict[str, Any]
         if not bool_query:
-            bool_query["must"] = [{"match_all": {}}]
+            query_clause = {"match_all": {}}
+        else:
+            query_clause = {"bool": bool_query}
 
         # ── Stage 1: DataJud paginated collection ────────────────
 
@@ -902,14 +1001,14 @@ def _run_pipeline(job_id: str) -> None:
 
             body: dict[str, Any] = {
                 "size": page_size,
-                "query": {"bool": bool_query},
+                "query": query_clause,
                 "sort": [{sort_field: {"order": sort_order}}],
             }
             if search_after:
                 body["search_after"] = search_after
 
             raw = _datajud_search(tribunal_alias, body)
-            total_hits = raw.get("hits", {}).get("total", {}).get("value", 0)
+            total_hits = _extract_total_hits(raw)
             processos = _parse_datajud_hits(raw, tribunal_alias)
             hits = raw.get("hits", {}).get("hits", [])
             next_sa = hits[-1].get("sort") if hits else None

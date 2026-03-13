@@ -638,20 +638,53 @@ export function PipelineTab() {
       include_documents: config.includeDocuments,
       enrichment_timeout: config.enrichmentTimeout,
     };
+    const parseIntOrNull = (raw: string): number | null => {
+      const n = Number.parseInt(raw.trim(), 10);
+      return Number.isNaN(n) ? null : n;
+    };
+
     if (config.numero.trim()) payload.numero_processo = config.numero.trim();
-    if (config.classeCodigo.trim()) payload.classe_codigo = parseInt(config.classeCodigo.trim());
-    if (config.assuntosCodigos.length > 0) payload.assuntos_codigos = config.assuntosCodigos.map(a => parseInt(a.codigo));
-    if (config.assuntosExcluir.length > 0) payload.assuntos_excluir_codigos = config.assuntosExcluir.map(a => parseInt(a.codigo));
-    if (config.orgaoJulgadorCodigo.trim()) payload.orgao_julgador_codigo = parseInt(config.orgaoJulgadorCodigo.trim());
+    {
+      const n = parseIntOrNull(config.classeCodigo);
+      if (n !== null) payload.classe_codigo = n;
+    }
+    if (config.assuntosCodigos.length > 0) {
+      const codigos = config.assuntosCodigos
+        .map((a) => parseIntOrNull(a.codigo))
+        .filter((n): n is number => n !== null);
+      if (codigos.length > 0) payload.assuntos_codigos = codigos;
+    }
+    if (config.assuntosExcluir.length > 0) {
+      const codigos = config.assuntosExcluir
+        .map((a) => parseIntOrNull(a.codigo))
+        .filter((n): n is number => n !== null);
+      if (codigos.length > 0) payload.assuntos_excluir_codigos = codigos;
+    }
+    {
+      const n = parseIntOrNull(config.orgaoJulgadorCodigo);
+      if (n !== null) payload.orgao_julgador_codigo = n;
+    }
     if (config.grau && config.grau !== "all" && config.grau !== "__all__") payload.grau = config.grau;
     if (config.dataInicio) payload.data_ajuizamento_inicio = config.dataInicio;
     if (config.dataFim) payload.data_ajuizamento_fim = config.dataFim;
     if (config.dataAtualizacaoInicio) payload.data_atualizacao_inicio = config.dataAtualizacaoInicio;
     if (config.dataAtualizacaoFim) payload.data_atualizacao_fim = config.dataAtualizacaoFim;
-    if (config.movimentoCodigo.trim()) payload.movimento_codigo = parseInt(config.movimentoCodigo.trim());
-    if (config.minMovimentos) payload.min_movimentos = parseInt(config.minMovimentos);
-    if (config.maxMovimentos) payload.max_movimentos = parseInt(config.maxMovimentos);
-    if (config.nivelSigilo !== "" && config.nivelSigilo !== "__all__") payload.nivel_sigilo = parseInt(config.nivelSigilo);
+    {
+      const n = parseIntOrNull(config.movimentoCodigo);
+      if (n !== null) payload.movimento_codigo = n;
+    }
+    {
+      const n = parseIntOrNull(config.minMovimentos);
+      if (n !== null) payload.min_movimentos = n;
+    }
+    {
+      const n = parseIntOrNull(config.maxMovimentos);
+      if (n !== null) payload.max_movimentos = n;
+    }
+    if (config.nivelSigilo !== "" && config.nivelSigilo !== "__all__") {
+      const n = parseIntOrNull(config.nivelSigilo);
+      if (n !== null) payload.nivel_sigilo = n;
+    }
     if (config.temAssuntos === "yes") payload.tem_assuntos = true;
     else if (config.temAssuntos === "no") payload.tem_assuntos = false;
     if (config.temMovimentos === "yes") payload.tem_movimentos = true;

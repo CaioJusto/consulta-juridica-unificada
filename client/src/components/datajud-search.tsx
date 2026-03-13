@@ -156,7 +156,7 @@ export function DataJudSearch() {
       if (numero.trim()) body.numero_processo = numero.trim();
       if (classeCodigo.trim()) body.classe_codigo = parseInt(classeCodigo.trim());
       if (assuntoCodigo.trim()) body.assunto_codigo = parseInt(assuntoCodigo.trim());
-      if (grau) body.grau = grau;
+      if (grau && grau !== "all" && grau !== "__all__") body.grau = grau;
       if (dataInicio) body.data_ajuizamento_inicio = dataInicio;
       if (dataFim) body.data_ajuizamento_fim = dataFim;
       if (loadMore && state.searchAfter) body.search_after = state.searchAfter;
