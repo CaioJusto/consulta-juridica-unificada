@@ -922,7 +922,9 @@ def _run_pipeline(job_id: str) -> None:
             if not processos:
                 break
 
-            for p in processos:
+            raw_sources_page = [h.get("_source", {}) for h in hits]
+
+            for idx, p in enumerate(processos):
                 # Build row dict with all fields
                 assuntos_str = "; ".join(a.get("nome", "") for a in p.get("assuntos", []))
                 movimentos = p.get("movimentos", [])
@@ -954,6 +956,9 @@ def _run_pipeline(job_id: str) -> None:
                 }
                 collected_rows.append(row)
                 job["rows"].append(row)
+                # Save raw _source for Excel export
+                raw_src = raw_sources_page[idx] if idx < len(raw_sources_page) else {}
+                job["raw_sources"].append(raw_src)
                 total_collected += 1
                 job["progress"]["collected"] = total_collected
 
@@ -976,48 +981,50 @@ def _run_pipeline(job_id: str) -> None:
 
         if enrich_processual:
             job["progress"]["stage"] = "enriching"
-            # Call TRF1Client directly from pipeline thread (plain Python thread, no asyncio context)
-            # Limit to 2 concurrent Playwright browsers via semaphore to avoid memory pressure
-            import concurrent.futures as cf
-            PLAYWRIGHT_SEM = threading.Semaphore(2)
-            completed = [0]
-            lock = threading.Lock()
+            from datajud_app.official_sources import enrich_from_official_sources
 
-            def enrich_row_processual(row):
-                with PLAYWRIGHT_SEM:
-                    try:
-                        digits = re.sub(r"\D", "", row["numero_processo"])
-                        proc = TRF1Client(secao="TRF1", timeout=45).buscar_por_numero(digits)
-                        if proc:
-                            row["polo_ativo_nome"] = proc.polo_ativo or ""
-                            row["polo_passivo_nome"] = proc.polo_passivo or ""
-                            advs: list[str] = []
-                            for p in (proc.partes or []):
-                                if isinstance(p, dict):
-                                    advs.extend(p.get("advogados", []))
-                                elif hasattr(p, "advogados"):
-                                    advs.extend(p.advogados or [])
-                            row["advogados"] = "; ".join(advs[:6])
-                            row["situacao_processual"] = proc.situacao or ""
-                            if proc.valor_causa:
-                                row["valor_causa"] = proc.valor_causa
-                    except Exception:
-                        with lock:
-                            job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
-                    finally:
-                        with lock:
-                            completed[0] += 1
-                            job["progress"]["enriched_processual"] = completed[0]
+            query_rows_official = [
+                {
+                    "source_row": {"numero_processo": row["numero_processo"]},
+                    "linha_origem": i,
+                    "numero_processo": row["numero_processo"],
+                    "tribunal_alias": tribunal_alias,
+                    "tribunal_alias_informado": tribunal_alias,
+                }
+                for i, row in enumerate(collected_rows, start=1)
+            ]
 
-            with cf.ThreadPoolExecutor(max_workers=2) as pool:
-                futures = []
-                for row in collected_rows:
-                    if job["status"] == "stopped":
-                        break
-                    while job["status"] == "paused":
-                        time.sleep(0.5)
-                    futures.append(pool.submit(enrich_row_processual, row))
-                cf.wait(futures)
+            prog_lock = threading.Lock()
+
+            def on_enrich_progress(current: int, total: int, message: str) -> None:
+                with prog_lock:
+                    job["progress"]["enriched_processual"] = current
+
+            official_result = enrich_from_official_sources(
+                query_rows_official,
+                on_progress=on_enrich_progress,
+            )
+
+            # Persist result lists in job (JSON-serializable dicts)
+            job["official_process_rows"] = official_result.process_rows
+            job["official_party_rows"] = official_result.party_rows
+            job["official_lawyer_rows"] = official_result.lawyer_rows
+            job["official_event_rows"] = official_result.event_rows
+            job["official_document_rows"] = official_result.document_rows
+            job["official_not_found_rows"] = official_result.not_found_rows
+            job["progress"]["enriched_processual"] = len(official_result.process_rows)
+            job["progress"]["errors"] = job["progress"].get("errors", 0) + len(official_result.errors)
+
+            # Update preview rows with official data
+            for row in collected_rows:
+                key = (tribunal_alias, row["numero_processo"])
+                official_proc = official_result.process_map.get(key)
+                if official_proc:
+                    row["polo_ativo_nome"] = official_proc.get("polo_ativo", "") or ""
+                    row["polo_passivo_nome"] = official_proc.get("polo_passivo", "") or ""
+                    row["advogados"] = official_proc.get("advogados_resumo", "") or ""
+                    # TRF1 doesn't have explicit situação — use last event as proxy
+                    row["situacao_processual"] = official_proc.get("ultimo_evento", "") or ""
 
         if job["status"] == "stopped":
             return
@@ -1096,6 +1103,13 @@ def pipeline_start(payload: dict = Body(...)):
             "errors": 0,
         },
         "rows": [],
+        "raw_sources": [],
+        "official_process_rows": [],
+        "official_party_rows": [],
+        "official_lawyer_rows": [],
+        "official_event_rows": [],
+        "official_document_rows": [],
+        "official_not_found_rows": [],
         "error": None,
     }
     t = threading.Thread(target=_run_pipeline, args=(job_id,), daemon=True)
@@ -1139,25 +1153,85 @@ def pipeline_control(job_id: str, payload: dict = Body(...)):
 
 @app.get("/api/pipeline/export/{job_id}")
 def pipeline_export(job_id: str):
-    """Export all collected rows as CSV."""
+    """Export all collected rows as Excel workbook with all 14 sheets."""
     from fastapi.responses import StreamingResponse
     import io
-    import csv as csv_mod
+    from datajud_app.excel_utils import (
+        build_result_workbook,
+        flatten_process,
+        movements_rows,
+        movement_complements_rows,
+        subjects_rows,
+        raw_rows,
+    )
 
     job = jobs.get(job_id)
-    if not job or not job["rows"]:
+    if not job or not job.get("rows"):
         return {"success": False, "error": "No data"}
 
-    rows = job["rows"]
-    output = io.StringIO()
-    writer = csv_mod.DictWriter(output, fieldnames=rows[0].keys(), extrasaction="ignore")
-    writer.writeheader()
-    writer.writerows(rows)
+    raw_sources = job.get("raw_sources", [])
+
+    # If raw_sources not available (old jobs), fall back to rows for basic sheets
+    if raw_sources:
+        process_rows = [flatten_process(s) for s in raw_sources]
+        movement_rows_data = movements_rows(raw_sources)
+        movement_complement_rows_data = movement_complements_rows(raw_sources)
+        subject_rows_data = subjects_rows(raw_sources)
+        raw_process_rows_data = raw_rows(raw_sources)
+    else:
+        process_rows = job["rows"]
+        movement_rows_data = []
+        movement_complement_rows_data = []
+        subject_rows_data = []
+        raw_process_rows_data = []
+
+    official_process_rows = job.get("official_process_rows", [])
+    official_party_rows = job.get("official_party_rows", [])
+    official_lawyer_rows = job.get("official_lawyer_rows", [])
+    official_event_rows = job.get("official_event_rows", [])
+    official_document_rows = job.get("official_document_rows", [])
+    official_not_found_rows = job.get("official_not_found_rows", [])
+
+    # Build official process map for merging
+    official_proc_map: dict = {}
+    for op in official_process_rows:
+        key = (op.get("tribunal", ""), op.get("numero_processo", ""))
+        official_proc_map[key] = op
+
+    # Build merged rows (DataJud + official side-by-side)
+    merged_rows = []
+    for p_row in process_rows:
+        key = (p_row.get("tribunal", ""), p_row.get("numero_processo", ""))
+        official_proc = official_proc_map.get(key)
+        merged = dict(p_row)
+        if official_proc:
+            for k, v in official_proc.items():
+                if k not in ("numero_processo", "tribunal"):
+                    merged[f"oficial_{k}"] = v
+        merged_rows.append(merged)
+
+    excel_bytes = build_result_workbook(
+        merged_rows=merged_rows,
+        process_rows=process_rows,
+        movement_rows=movement_rows_data,
+        movement_complement_rows=movement_complement_rows_data,
+        subject_rows=subject_rows_data,
+        official_process_rows=official_process_rows,
+        official_party_rows=official_party_rows,
+        official_lawyer_rows=official_lawyer_rows,
+        official_event_rows=official_event_rows,
+        official_document_rows=official_document_rows,
+        raw_process_rows=raw_process_rows_data,
+        not_found_rows=official_not_found_rows,
+    )
 
     return StreamingResponse(
-        io.BytesIO(output.getvalue().encode("utf-8-sig")),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=pipeline_{job_id[:8]}.csv"},
+        io.BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename=pipeline_{job_id[:8]}.xlsx",
+            "Content-Length": str(len(excel_bytes)),
+        },
     )
 
 

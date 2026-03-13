@@ -29,7 +29,7 @@ export async function registerRoutes(
 
       const response = await fetch(url.toString(), fetchOptions);
       const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("text/csv") || contentType.includes("octet-stream")) {
+      if (contentType.includes("text/csv") || contentType.includes("octet-stream") || contentType.includes("spreadsheetml")) {
         // Forward binary/CSV responses directly (e.g. pipeline export)
         const buffer = await response.arrayBuffer();
         const disposition = response.headers.get("content-disposition") || "";

@@ -704,7 +704,7 @@ export function PipelineTab() {
     setRowCount(0);
   }
 
-  // ─── CSV export (server-side) ─────────────────────────────
+  // ─── Excel export (server-side) ──────────────────────────
 
   async function exportCSV(_currentRows: PipelineRow[]) {
     if (!jobId) return;
@@ -715,11 +715,11 @@ export function PipelineTab() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `pipeline_${new Date().toISOString().slice(0, 10)}_${rowCount}processos.csv`;
+      a.download = `pipeline_${new Date().toISOString().slice(0, 10)}_${rowCount}processos.xlsx`;
       a.click();
       URL.revokeObjectURL(url);
     } catch {
-      setError("Erro ao exportar CSV.");
+      setError("Erro ao exportar Excel.");
     }
   }
   // ─── count active pipeline filters ───────────────────────
@@ -1244,7 +1244,7 @@ export function PipelineTab() {
               data-testid="button-pipeline-export"
             >
               <Download className="w-3.5 h-3.5" />
-              Exportar CSV ({rowCount || rows.length})
+              Exportar Excel (.xlsx) ({rowCount || rows.length})
             </Button>
           )}
           {hasResults && !isRunning && !isPaused && (
@@ -1426,7 +1426,7 @@ export function PipelineTab() {
                 className="h-7 text-xs gap-1.5"
               >
                 <Download className="w-3 h-3" />
-                CSV ({rowCount || rows.length})
+                Excel ({rowCount || rows.length})
               </Button>
             </div>
           </div>
