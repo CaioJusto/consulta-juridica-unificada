@@ -946,43 +946,47 @@ def _run_pipeline(job_id: str) -> None:
 
         if enrich_processual:
             job["progress"]["stage"] = "enriching"
-            batch_size = max(1, min(int(config.get("batch_size", 4)), 6))  # cap at 6 parallel Playwright
+            # Call the existing /api/processo HTTP endpoint (avoids spawning multiple Playwright browsers)
+            # Use a semaphore to limit concurrency to 3 parallel browser sessions
+            import requests as _requests
+            import concurrent.futures as cf
+            ENRICH_WORKERS = 3
+            sem = threading.Semaphore(ENRICH_WORKERS)
             completed = [0]
             lock = threading.Lock()
 
             def enrich_row_processual(row):
-                try:
-                    digits = re.sub(r"\D", "", row["numero_processo"])
-                    import concurrent.futures as _cf
-                    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                        future = _ex.submit(lambda: TRF1Client(secao="TRF1", timeout=45).buscar_por_numero(digits))
-                        proc = future.result(timeout=50)
-                    if proc:
-                        advogados = [p for p in proc.partes if p.oab]
-                        partes = [p for p in proc.partes if not p.oab]
-                        polo_ativo = [p for p in partes if "ATIVO" in (p.tipo or "").upper() or "ATIVO" in (p.caracteristica or "").upper()]
-                        polo_passivo = [p for p in partes if "PASSIVO" in (p.tipo or "").upper() or "PASSIVO" in (p.caracteristica or "").upper()]
-                        ativos = polo_ativo if polo_ativo else partes[:max(1, len(partes) // 2)]
-                        passivos = polo_passivo if polo_passivo else partes[max(1, len(partes) // 2):]
-                        row["polo_ativo_nome"] = "; ".join(p.nome for p in ativos[:3] if p.nome)
-                        row["polo_ativo_cpf"] = next((p.entidade for p in ativos if p.entidade), "")
-                        row["polo_passivo_nome"] = "; ".join(p.nome for p in passivos[:3] if p.nome)
-                        row["polo_passivo_cnpj"] = next((p.entidade for p in passivos if p.entidade), "")
-                        row["advogados"] = "; ".join(
-                            f"{p.nome} (OAB: {p.oab})" if p.oab else p.nome
-                            for p in advogados[:4] if p.nome
+                with sem:
+                    try:
+                        num = row["numero_processo"]
+                        resp = _requests.get(
+                            "http://localhost:8000/api/processo",
+                            params={"numero": num, "secao": "TRF1"},
+                            timeout=60,
                         )
-                        row["situacao_processual"] = proc.situacao or ""
-                except Exception:
-                    with lock:
-                        job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
-                finally:
-                    with lock:
-                        completed[0] += 1
-                        job["progress"]["enriched_processual"] = completed[0]
+                        data = resp.json()
+                        if data.get("success") and data.get("data"):
+                            d = data["data"]
+                            row["polo_ativo_nome"] = d.get("polo_ativo", "")
+                            row["polo_ativo_cpf"] = ""
+                            row["polo_passivo_nome"] = d.get("polo_passivo", "")
+                            row["polo_passivo_cnpj"] = ""
+                            # collect advogados from partes list
+                            advs = []
+                            for p in d.get("partes", []):
+                                advs.extend(p.get("advogados", []))
+                            row["advogados"] = "; ".join(advs[:6])
+                            row["situacao_processual"] = d.get("situacao", "")
+                            row["valor_causa"] = d.get("valor_causa", "") or row.get("valor_causa", "")
+                    except Exception:
+                        with lock:
+                            job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
+                    finally:
+                        with lock:
+                            completed[0] += 1
+                            job["progress"]["enriched_processual"] = completed[0]
 
-            import concurrent.futures as cf
-            with cf.ThreadPoolExecutor(max_workers=batch_size) as pool:
+            with cf.ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
                 futures = []
                 for row in collected_rows:
                     if job["status"] == "stopped":
