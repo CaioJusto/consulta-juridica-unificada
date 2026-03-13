@@ -453,13 +453,21 @@ export function PipelineTab() {
             startedAt: 0,
           },
           stage2: {
-            status: enrichedP > 0 ? (data.status === "done" ? "done" : "running") : (collected > 0 ? "skipped" : "waiting"),
+            status: !config.enrichProcessual ? "skipped"
+              : data.status === "done" ? (enrichedP > 0 ? "done" : "skipped")
+              : enrichedP > 0 ? "running"
+              : progress.stage === "enriching" ? "running"
+              : collected > 0 && progress.stage === "collecting" ? "waiting"
+              : "waiting",
             current: enrichedP,
             total: collected,
             startedAt: 0,
           },
           stage3: {
-            status: enrichedPub > 0 ? (data.status === "done" ? "done" : "running") : (collected > 0 ? "skipped" : "waiting"),
+            status: !config.enrichPublico ? "skipped"
+              : data.status === "done" ? (enrichedPub > 0 ? "done" : "skipped")
+              : enrichedPub > 0 ? "running"
+              : "waiting",
             current: enrichedPub,
             total: collected,
             startedAt: 0,
@@ -501,6 +509,7 @@ export function PipelineTab() {
             ultima_mov_publico: "",
             processual_status: r.polo_ativo_nome ? "found" : "skipped",
             publico_status: r.valor_causa ? "found" : "skipped",
+            datajud_movimentos: [],
             processual_partes: [],
             processual_movimentacoes: [],
             publico_partes: [],
