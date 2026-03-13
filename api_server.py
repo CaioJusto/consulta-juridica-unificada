@@ -1006,13 +1006,22 @@ def _run_pipeline(job_id: str) -> None:
             )
 
             # Persist result lists in job (JSON-serializable dicts)
+            include_documents = config.get("include_documents", True)
             job["official_process_rows"] = official_result.process_rows
             job["official_party_rows"] = official_result.party_rows
             job["official_lawyer_rows"] = official_result.lawyer_rows
             job["official_event_rows"] = official_result.event_rows
-            job["official_document_rows"] = official_result.document_rows
+            # If include_documents=False, strip texto_documento/texto_certidao to save memory
+            doc_rows = official_result.document_rows
+            if not include_documents:
+                for dr in doc_rows:
+                    dr.pop("texto_documento", None)
+                    dr.pop("texto_certidao", None)
+            job["official_document_rows"] = doc_rows
             job["official_not_found_rows"] = official_result.not_found_rows
             job["progress"]["enriched_processual"] = len(official_result.process_rows)
+            job["progress"]["not_found_count"] = len(official_result.not_found_rows)
+            job["progress"]["error_details"] = official_result.errors[:20]  # keep first 20
             job["progress"]["errors"] = job["progress"].get("errors", 0) + len(official_result.errors)
 
             # Update preview rows with official data
@@ -1101,6 +1110,8 @@ def pipeline_start(payload: dict = Body(...)):
             "enriched_processual": 0,
             "enriched_publico": 0,
             "errors": 0,
+            "not_found_count": 0,
+            "error_details": [],
         },
         "rows": [],
         "raw_sources": [],

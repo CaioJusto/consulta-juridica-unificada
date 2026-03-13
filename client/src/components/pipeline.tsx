@@ -263,6 +263,8 @@ interface PipelineConfig {
   enrichProcessual: boolean;
   enrichPublico: boolean;
   batchSize: number;
+  includeDocuments: boolean;
+  enrichmentTimeout: number;
 }
 
 interface StageState {
@@ -370,6 +372,8 @@ export function PipelineTab() {
     enrichProcessual: true,
     enrichPublico: false,
     batchSize: 8,
+    includeDocuments: true,
+    enrichmentTimeout: 45,
   });
 
   // SGT autocomplete states for pipeline
@@ -631,6 +635,8 @@ export function PipelineTab() {
       enrich_processual: config.enrichProcessual,
       enrich_publico: config.enrichPublico,
       batch_size: config.batchSize,
+      include_documents: config.includeDocuments,
+      enrichment_timeout: config.enrichmentTimeout,
     };
     if (config.numero.trim()) payload.numero_processo = config.numero.trim();
     if (config.classeCodigo.trim()) payload.classe_codigo = parseInt(config.classeCodigo.trim());
@@ -1177,6 +1183,25 @@ export function PipelineTab() {
             </Label>
           </div>
         </div>
+
+        {/* Include documents sub-option (only when enrichProcessual is enabled) */}
+        {config.enrichProcessual && (
+          <div className="flex items-center gap-2 pl-6 -mt-1">
+            <Switch
+              id="include-documents"
+              checked={config.includeDocuments}
+              onCheckedChange={(v) => upd("includeDocuments", v)}
+              disabled={isRunning || isPaused}
+            />
+            <Label htmlFor="include-documents" className="text-xs cursor-pointer">
+              <span className="font-medium flex items-center gap-1">
+                <FileText className="w-3 h-3 text-amber-500" />
+                Incluir texto dos documentos
+              </span>
+              <span className="text-muted-foreground">mais lento, mas completo (petições, despachos)</span>
+            </Label>
+          </div>
+        )}
 
         {/* Warnings */}
         {config.enrichProcessual && config.batchSize > 5 && (
