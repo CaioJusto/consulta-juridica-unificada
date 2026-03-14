@@ -77,6 +77,37 @@ npm run build
 NODE_ENV=production node dist/index.cjs
 ```
 
+## Railway
+
+Para a Railway, a estratégia recomendada é:
+
+- subir o container com `PLAYWRIGHT_USE_XVFB=1`
+- deixar o `TRF1 Processual` rodar com browser não-headless dentro do `xvfb`
+- manter o `PJe público` em headless por padrão
+
+Variáveis úteis:
+
+```bash
+PLAYWRIGHT_USE_XVFB=1
+ENABLE_TRF1_SCRAPING=true
+TRF1_PROCESSUAL_HEADLESS=false
+TRF1_PUBLIC_HEADLESS=true
+```
+
+Se quiser desacoplar o browser do container da Railway, também há suporte a navegador remoto:
+
+```bash
+TRF1_PLAYWRIGHT_WS_ENDPOINT=wss://...
+# ou
+TRF1_PLAYWRIGHT_CDP_URL=http://.../json/version
+```
+
+Observação importante:
+
+- o portal `processual.trf1.jus.br` pode bloquear automação em modo headless
+- por isso, na Railway, o melhor caminho é `xvfb + headless=false` para o TRF1 Processual
+- o endpoint `/api/config/status` expõe o estado básico dessa configuração
+
 ## Estrutura do Projeto
 
 ```

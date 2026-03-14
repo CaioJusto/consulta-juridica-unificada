@@ -1,11 +1,17 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+if [ "${PLAYWRIGHT_USE_XVFB:-1}" = "1" ]; then
+  PYTHON_API_CMD=(xvfb-run -a -s "-screen 0 1280x1024x24" python3 api_server.py)
+else
+  PYTHON_API_CMD=(python3 api_server.py)
+fi
 
 # Start Python API in background with automatic restart loop
 (
   while true; do
     echo "[entrypoint] Starting Python API..."
-    python3 api_server.py || true
+    "${PYTHON_API_CMD[@]}" || true
     echo "[entrypoint] Python API exited, restarting in 2s..."
     sleep 2
   done

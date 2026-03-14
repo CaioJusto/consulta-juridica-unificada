@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+from playwright_runtime import launch_browser
 
 TRF1_PROCESSUAL_BASE = "https://processual.trf1.jus.br/consultaProcessual"
 
@@ -31,25 +31,11 @@ SECURITY_BLOCK_RE = re.compile(
 )
 TOO_BROAD_RE = re.compile(r"mais de 500 .*? encontrad", re.IGNORECASE)
 
-
-def _bool_env(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _has_display() -> bool:
-    return bool(os.environ.get("DISPLAY") or sys.platform == "darwin")
-
-
 def _launch_browser(playwright: Any) -> Any:
-    headless = _bool_env("TRF1_PROCESSUAL_HEADLESS", default=not _has_display())
-    kwargs: dict[str, Any] = {"headless": headless}
-    proxy_url = os.environ.get("TRF1_PROXY_URL", "").strip()
-    if proxy_url:
-        kwargs["proxy"] = {"server": proxy_url}
-    return playwright.chromium.launch(**kwargs)
+    return launch_browser(
+        playwright,
+        headless_env="TRF1_PROCESSUAL_HEADLESS",
+    )
 
 
 def _clean_text(value: Any) -> str:

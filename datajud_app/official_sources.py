@@ -14,15 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
+from playwright_runtime import launch_browser
 
-
-def _pw_launch_args() -> dict:
-    """Return Playwright chromium.launch kwargs with optional proxy."""
-    args: dict[str, Any] = {"headless": True}
-    proxy_url = os.environ.get("TRF1_PROXY_URL", "").strip()
-    if proxy_url:
-        args["proxy"] = {"server": proxy_url}
-    return args
 
 import requests
 from bs4 import BeautifulSoup
@@ -653,7 +646,11 @@ def _process_single_trf1_row(row: dict[str, Any], source_label: str, _retry: int
     line_number = row.get("linha_origem")
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(**_pw_launch_args())
+        browser = launch_browser(
+            playwright,
+            headless_env="OFFICIAL_SOURCES_HEADLESS",
+            default_headless=True,
+        )
         context = browser.new_context(locale="pt-BR")
         page = context.new_page()
         try:

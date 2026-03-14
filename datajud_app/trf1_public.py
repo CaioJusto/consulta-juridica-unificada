@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,6 +10,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+from playwright_runtime import launch_browser
 
 from datajud_app.excel_utils import normalize_process_number
 from datajud_app.official_sources import (
@@ -144,11 +144,11 @@ def search_trf1_public_bundle(
     _report(0, max_details + 2, "Abrindo o portal do TRF1...")
 
     with sync_playwright() as playwright:
-        _launch_args: dict[str, Any] = {"headless": True}
-        _proxy_url = os.environ.get("TRF1_PROXY_URL", "").strip()
-        if _proxy_url:
-            _launch_args["proxy"] = {"server": _proxy_url}
-        browser = playwright.chromium.launch(**_launch_args)
+        browser = launch_browser(
+            playwright,
+            headless_env="TRF1_PUBLIC_HEADLESS",
+            default_headless=True,
+        )
         context = browser.new_context(locale="pt-BR")
         search_page = context.new_page()
         try:

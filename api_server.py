@@ -108,6 +108,11 @@ def config_status():
         "trf1_scraping_enabled": ENABLE_TRF1_SCRAPING,
         "trf1_proxy_configured": bool(TRF1_PROXY_URL),
         "trf1_proxy_url": TRF1_PROXY_URL[:20] + "..." if len(TRF1_PROXY_URL) > 20 else TRF1_PROXY_URL or None,
+        "playwright_use_xvfb": os.environ.get("PLAYWRIGHT_USE_XVFB", "1"),
+        "trf1_processual_headless": os.environ.get("TRF1_PROCESSUAL_HEADLESS", "auto"),
+        "trf1_public_headless": os.environ.get("TRF1_PUBLIC_HEADLESS", "auto"),
+        "trf1_playwright_ws_configured": bool(os.environ.get("TRF1_PLAYWRIGHT_WS_ENDPOINT", "").strip()),
+        "trf1_playwright_cdp_configured": bool(os.environ.get("TRF1_PLAYWRIGHT_CDP_URL", "").strip()),
     }
 
 
@@ -1993,6 +1998,14 @@ if __name__ == "__main__":
     try:
         logger.info("Starting API server on port 8000")
         logger.info("TRF1 scraping: %s | proxy: %s", ENABLE_TRF1_SCRAPING, TRF1_PROXY_URL or "none")
+        logger.info(
+            "Playwright runtime | xvfb=%s | processual_headless=%s | public_headless=%s | ws=%s | cdp=%s",
+            os.environ.get("PLAYWRIGHT_USE_XVFB", "1"),
+            os.environ.get("TRF1_PROCESSUAL_HEADLESS", "auto"),
+            os.environ.get("TRF1_PUBLIC_HEADLESS", "auto"),
+            "configured" if os.environ.get("TRF1_PLAYWRIGHT_WS_ENDPOINT", "").strip() else "none",
+            "configured" if os.environ.get("TRF1_PLAYWRIGHT_CDP_URL", "").strip() else "none",
+        )
         uvicorn.run(app, host="0.0.0.0", port=8000)
     except Exception as e:
         logger.critical("API server crashed: %s\n%s", e, traceback.format_exc())
