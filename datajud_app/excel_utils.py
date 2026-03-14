@@ -185,6 +185,13 @@ def build_result_workbook(
     movement_complement_rows: list[dict[str, Any]],
     subject_rows: list[dict[str, Any]],
     credit_analysis_rows: list[dict[str, Any]] | None = None,
+    processual_process_rows: list[dict[str, Any]] | None = None,
+    processual_party_rows: list[dict[str, Any]] | None = None,
+    processual_event_rows: list[dict[str, Any]] | None = None,
+    processual_distribution_rows: list[dict[str, Any]] | None = None,
+    processual_petition_rows: list[dict[str, Any]] | None = None,
+    processual_document_rows: list[dict[str, Any]] | None = None,
+    processual_incident_rows: list[dict[str, Any]] | None = None,
     official_consulta_rows: list[dict[str, Any]] | None = None,
     official_process_rows: list[dict[str, Any]] | None = None,
     official_party_rows: list[dict[str, Any]] | None = None,
@@ -201,6 +208,13 @@ def build_result_workbook(
     official_event_rows = official_event_rows or []
     official_document_rows = official_document_rows or []
     credit_analysis_rows = credit_analysis_rows or []
+    processual_process_rows = processual_process_rows or []
+    processual_party_rows = processual_party_rows or []
+    processual_event_rows = processual_event_rows or []
+    processual_distribution_rows = processual_distribution_rows or []
+    processual_petition_rows = processual_petition_rows or []
+    processual_document_rows = processual_document_rows or []
+    processual_incident_rows = processual_incident_rows or []
 
     workbook = Workbook()
     first_sheet = workbook.active
@@ -212,6 +226,13 @@ def build_result_workbook(
     _write_sheet(workbook, "complementos_mov", movement_complement_rows)
     _write_sheet(workbook, "assuntos", subject_rows)
     _write_sheet(workbook, "analise_credito", credit_analysis_rows)
+    _write_sheet(workbook, "trf1_processual", processual_process_rows)
+    _write_sheet(workbook, "trf1_proc_partes", processual_party_rows)
+    _write_sheet(workbook, "trf1_proc_movs", processual_event_rows)
+    _write_sheet(workbook, "trf1_proc_dist", processual_distribution_rows)
+    _write_sheet(workbook, "trf1_proc_pet", processual_petition_rows)
+    _write_sheet(workbook, "trf1_proc_docs", processual_document_rows)
+    _write_sheet(workbook, "trf1_proc_incs", processual_incident_rows)
     _write_sheet(workbook, "consulta_processo", official_consulta_rows)
     _write_sheet(workbook, "fontes_oficiais", official_process_rows)
     _write_sheet(workbook, "partes_oficiais", official_party_rows)

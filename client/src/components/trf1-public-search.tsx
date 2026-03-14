@@ -309,6 +309,11 @@ function TRF1PublicProcessoView({
             Movimentações
             <span className="ml-1.5 opacity-70">{processo.movimentacoes.length}</span>
           </TabsTrigger>
+          <TabsTrigger value="docs" className="text-xs px-3 py-1.5 rounded-md data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=inactive]:bg-muted">
+            <FileText className="w-3.5 h-3.5 mr-1.5" />
+            Documentos
+            <span className="ml-1.5 opacity-70">{processo.documentos?.length ?? 0}</span>
+          </TabsTrigger>
         </TabsList>
 
         {/* Dados */}
@@ -318,9 +323,11 @@ function TRF1PublicProcessoView({
             <PubInfoRow label="Classe" value={processo.classe} icon={FileText} />
             <PubInfoRow label="Assunto" value={processo.assunto} icon={FileText} />
             <PubInfoRow label="Órgão Julgador" value={processo.orgao_julgador} icon={Building2} />
+            <PubInfoRow label="Jurisdição" value={processo.jurisdicao || ""} icon={Building2} />
             <PubInfoRow label="Distribuição" value={processo.data_distribuicao} icon={Calendar} />
             <PubInfoRow label="Valor da Causa" value={processo.valor_causa} icon={DollarSign} />
             <PubInfoRow label="Situação" value={processo.situacao} icon={Info} />
+            <PubInfoRow label="Processo referência" value={processo.processo_referencia || ""} icon={Hash} />
           </div>
         </TabsContent>
 
@@ -373,6 +380,28 @@ function TRF1PublicProcessoView({
                         ))}
                       </div>
                     )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="docs">
+          {!processo.documentos || processo.documentos.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground text-sm">Nenhum documento</div>
+          ) : (
+            <div className="space-y-2">
+              {processo.documentos.map((doc, i) => (
+                <div key={i} className="bg-card border border-border rounded-lg p-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {doc.data_hora && <Badge variant="outline" className="text-[10px]">{doc.data_hora}</Badge>}
+                    {doc.certidao && <Badge variant="secondary" className="text-[10px]">{doc.certidao}</Badge>}
+                  </div>
+                  <p className="text-sm font-medium mt-1">{doc.documento || "Documento"}</p>
+                  <div className="flex gap-3 mt-1">
+                    {doc.url_documento && <a href={doc.url_documento} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">Abrir documento</a>}
+                    {doc.url_certidao && <a href={doc.url_certidao} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">Abrir certidão</a>}
                   </div>
                 </div>
               ))}

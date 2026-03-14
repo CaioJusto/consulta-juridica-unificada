@@ -110,6 +110,7 @@ export interface ResultadoBusca {
   nome_parte: string;
   secao: string;
   url: string;
+  processo_originario?: string;
 }
 
 export interface ApiResponse<T> {
@@ -186,18 +187,47 @@ export interface TRF1PublicMovement {
   tipo: string;
   descricao: string;
   documentos: string[];
+  documento_url?: string;
+}
+
+export interface TRF1PublicDocument {
+  ordem: string;
+  data_hora: string;
+  documento: string;
+  certidao: string;
+  url_documento: string;
+  url_certidao: string;
+  texto_documento?: string;
+  texto_certidao?: string;
 }
 
 export interface TRF1PublicProcess {
   numero_processo: string;
   classe: string;
+  classe_codigo?: string;
   assunto: string;
   orgao_julgador: string;
+  jurisdicao?: string;
+  endereco_orgao_julgador?: string;
   data_distribuicao: string;
   valor_causa: string;
   situacao: string;
+  processo_referencia?: string;
+  polo_ativo?: string;
+  polo_passivo?: string;
+  outros_interessados?: string;
+  advogados_resumo?: string;
+  quantidade_partes?: number;
+  quantidade_advogados?: number;
+  quantidade_eventos?: number;
+  quantidade_documentos?: number;
+  cessao_credito?: string;
+  cessao_detalhes?: string;
+  partes_cedentes?: string;
+  partes_nao_cedentes?: string;
   partes: TRF1PublicParty[];
   movimentacoes: TRF1PublicMovement[];
+  documentos?: TRF1PublicDocument[];
   url_detalhes: string;
 }
 

@@ -225,6 +225,7 @@ interface PipelineRow {
   situacao_processual: string;
   processual_partes: Parte[];            // full for detail panel
   processual_movimentacoes: Movimentacao[]; // full for detail panel
+  processual_data: Processo | null;
   // ── TRF1 Público ─────────────────────────────────────────
   publico_status: EnrichStatus;
   valor_causa: string;
@@ -234,6 +235,7 @@ interface PipelineRow {
   ultima_mov_publico: string;
   publico_partes: TRF1PublicParty[];       // full for detail panel
   publico_movimentacoes: TRF1PublicMovement[]; // full for detail panel
+  publico_data: TRF1PublicProcess | null;
 }
 
 interface PipelineConfig {
@@ -317,6 +319,7 @@ function makeRow(p: DataJudProcesso, tribunal: string): PipelineRow {
     situacao_processual: "",
     processual_partes: [],
     processual_movimentacoes: [],
+    processual_data: null,
     // TRF1 Público
     publico_status: "pending",
     valor_causa: "",
@@ -326,6 +329,7 @@ function makeRow(p: DataJudProcesso, tribunal: string): PipelineRow {
     ultima_mov_publico: "",
     publico_partes: [],
     publico_movimentacoes: [],
+    publico_data: null,
   };
 }
 
@@ -339,6 +343,76 @@ const INITIAL_PIPELINE: PipelineState = {
   stage3: makeStage(),
   datajudGrandTotal: 0,
 };
+
+const RESULTS_PAGE_SIZE = 100;
+
+function mapPipelineRow(r: Record<string, unknown>, id: string): PipelineRow {
+  const processualData = (r.processual_data as Processo | null | undefined) ?? null;
+  const publicoData = (r.publico_data as TRF1PublicProcess | null | undefined) ?? null;
+  const processualPartes =
+    (Array.isArray(r.processual_partes) ? (r.processual_partes as Parte[]) : processualData?.partes) ?? [];
+  const processualMovimentacoes =
+    (Array.isArray(r.processual_movimentacoes)
+      ? (r.processual_movimentacoes as Movimentacao[])
+      : processualData?.movimentacoes) ?? [];
+  const publicoPartes =
+    (Array.isArray(r.publico_partes) ? (r.publico_partes as TRF1PublicParty[]) : publicoData?.partes) ?? [];
+  const publicoMovimentacoes =
+    (Array.isArray(r.publico_movimentacoes)
+      ? (r.publico_movimentacoes as TRF1PublicMovement[])
+      : publicoData?.movimentacoes) ?? [];
+
+  return {
+    id,
+    numero_processo: String(r.numero_processo || ""),
+    tribunal: String(r.tribunal || ""),
+    classe: String(r.classe || ""),
+    orgao_julgador: String(r.orgao_julgador || ""),
+    grau: String(r.grau || ""),
+    data_ajuizamento: String(r.data_ajuizamento || ""),
+    ultima_atualizacao: String(r.ultima_atualizacao || ""),
+    assuntos: String(r.assuntos || ""),
+    qtd_movimentos: Number(r.qtd_movimentos || 0),
+    primeira_movimentacao: String(r.primeira_movimentacao || ""),
+    ultima_mov_data: String(r.ultima_mov_data || ""),
+    ultima_mov_nome: String(r.ultima_mov_nome || r.ultima_movimentacao || ""),
+    polo_ativo_nome: String(r.polo_ativo_nome || ""),
+    polo_ativo_cpf: String(r.polo_ativo_cpf || ""),
+    polo_passivo_nome: String(r.polo_passivo_nome || ""),
+    polo_passivo_cnpj: String(r.polo_passivo_cnpj || ""),
+    partes: String(r.partes || processualPartes.map((p) => p.nome).slice(0, 5).join(" | ")),
+    advogados: String(r.advogados || ""),
+    qtd_partes: Number(r.qtd_partes || r.processual_qtd_partes || processualPartes.length || 0),
+    qtd_advogados:
+      Number(
+        r.qtd_advogados ||
+          processualPartes.filter((p) => p.oab).length ||
+          publicoData?.quantidade_advogados ||
+          0
+      ),
+    situacao_processual: String(r.situacao_processual || processualData?.situacao || ""),
+    processual_status: (r.processual_status as EnrichStatus | undefined) || (processualData ? "found" : "skipped"),
+    processual_partes: processualPartes,
+    processual_movimentacoes: processualMovimentacoes,
+    processual_data: processualData,
+    valor_causa: String(r.valor_causa || publicoData?.valor_causa || ""),
+    situacao_publico: String(r.situacao_publico || r.situacao_pje || publicoData?.situacao || ""),
+    orgao_julgador_pje: String(r.orgao_julgador_pje || publicoData?.orgao_julgador || ""),
+    data_distribuicao_pje: String(r.data_distribuicao_pje || publicoData?.data_distribuicao || ""),
+    ultima_mov_publico:
+      String(
+        r.ultima_mov_publico ||
+          (publicoMovimentacoes.length > 0
+            ? `${publicoMovimentacoes[0]?.data || ""} ${publicoMovimentacoes[0]?.descricao || ""}`.trim()
+            : "")
+      ),
+    publico_status: (r.publico_status as EnrichStatus | undefined) || (publicoData ? "found" : "skipped"),
+    publico_partes: publicoPartes,
+    publico_movimentacoes: publicoMovimentacoes,
+    publico_data: publicoData,
+    datajud_movimentos: (Array.isArray(r.datajud_movimentos) ? (r.datajud_movimentos as DataJudMovimento[]) : []),
+  };
+}
 
 // ─── main component ──────────────────────────────────────────
 
@@ -399,6 +473,13 @@ export function PipelineTab() {
   const [selectedRow, setSelectedRow] = useState<PipelineRow | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [rowCount, setRowCount] = useState(0);
+  const [resultQuery, setResultQuery] = useState("");
+  const [resultSource, setResultSource] = useState("all");
+  const [documentsOnly, setDocumentsOnly] = useState(false);
+  const [resultOffset, setResultOffset] = useState(0);
+  const [resultTotal, setResultTotal] = useState(0);
+  const [resultsLoading, setResultsLoading] = useState(false);
+  const [detailLoadingNumero, setDetailLoadingNumero] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -431,10 +512,12 @@ export function PipelineTab() {
 
         // Map server status to phase
         const statusMap: Record<string, Phase> = {
-          running: progress.stage === "collecting" ? "collecting"
-            : progress.enriched_processual > 0 && progress.enriched_publico === 0 ? "enriching_processual"
-            : progress.enriched_publico > 0 ? "enriching_publico"
-            : "collecting",
+          running:
+            progress.stage === "enriching_processual"
+              ? "enriching_processual"
+              : progress.stage === "enriching_publico"
+              ? "enriching_publico"
+              : "collecting",
           paused: "paused",
           stopped: "aborted",
           done: "done",
@@ -460,7 +543,7 @@ export function PipelineTab() {
             status: !config.enrichProcessual ? "skipped"
               : data.status === "done" ? (enrichedP > 0 ? "done" : "skipped")
               : enrichedP > 0 ? "running"
-              : progress.stage === "enriching" ? "running"
+              : progress.stage === "enriching_processual" ? "running"
               : collected > 0 && progress.stage === "collecting" ? "waiting"
               : "waiting",
             current: enrichedP,
@@ -481,44 +564,11 @@ export function PipelineTab() {
         setRowCount(data.row_count || 0);
 
         // Show preview rows (last 20 from server)
-        if (data.preview_rows && data.preview_rows.length > 0) {
+        if (!["done", "stopped", "paused"].includes(data.status) && data.preview_rows && data.preview_rows.length > 0) {
           // Convert server row format to PipelineRow for display
-          const serverRows: PipelineRow[] = data.preview_rows.map((r: Record<string, unknown>, i: number) => ({
-            id: `${jobId}-${i}`,
-            numero_processo: String(r.numero_processo || ""),
-            tribunal: String(r.tribunal || ""),
-            classe: String(r.classe || ""),
-            orgao_julgador: String(r.orgao_julgador || ""),
-            grau: String(r.grau || ""),
-            data_ajuizamento: String(r.data_ajuizamento || ""),
-            ultima_atualizacao: String(r.ultima_atualizacao || ""),
-            assuntos: String(r.assuntos || ""),
-            qtd_movimentos: Number(r.qtd_movimentos || 0),
-            primeira_movimentacao: "",
-            ultima_mov_data: "",
-            ultima_mov_nome: String(r.ultima_movimentacao || ""),
-            polo_ativo_nome: String(r.polo_ativo_nome || ""),
-            polo_ativo_cpf: String(r.polo_ativo_cpf || ""),
-            polo_passivo_nome: String(r.polo_passivo_nome || ""),
-            polo_passivo_cnpj: String(r.polo_passivo_cnpj || ""),
-            partes: "",
-            advogados: String(r.advogados || ""),
-            qtd_partes: 0,
-            qtd_advogados: 0,
-            situacao_processual: String(r.situacao_processual || ""),
-            valor_causa: String(r.valor_causa || ""),
-            situacao_publico: String(r.situacao_pje || ""),
-            orgao_julgador_pje: String(r.orgao_julgador_pje || ""),
-            data_distribuicao_pje: "",
-            ultima_mov_publico: "",
-            processual_status: r.polo_ativo_nome ? "found" : "skipped",
-            publico_status: r.valor_causa ? "found" : "skipped",
-            datajud_movimentos: [],
-            processual_partes: [],
-            processual_movimentacoes: [],
-            publico_partes: [],
-            publico_movimentacoes: [],
-          }));
+          const serverRows: PipelineRow[] = data.preview_rows.map((r: Record<string, unknown>, i: number) =>
+            mapPipelineRow(r, `${jobId}-${i}`)
+          );
           setRows(serverRows);
         }
 
@@ -543,6 +593,44 @@ export function PipelineTab() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [jobId]);
+
+  const loadResults = useCallback(async () => {
+    if (!jobId) return;
+    setResultsLoading(true);
+    try {
+      const params = new URLSearchParams({
+        offset: String(resultOffset),
+        limit: String(RESULTS_PAGE_SIZE),
+        source: resultSource,
+      });
+      if (resultQuery.trim()) params.set("q", resultQuery.trim());
+      if (documentsOnly) params.set("documents_only", "true");
+      const res = await fetch(`${API_BASE}/api/pipeline/results/${jobId}?${params.toString()}`);
+      const json = await res.json();
+      if (!json.success) {
+        setError(json.error || "Erro ao carregar resultados.");
+        return;
+      }
+      const pageRows = (json.data?.rows || []).map((row: Record<string, unknown>, index: number) =>
+        mapPipelineRow(row, `${jobId}-${resultOffset + index}`)
+      );
+      setRows(pageRows);
+      setResultTotal(Number(json.data?.total || 0));
+    } catch {
+      setError("Erro ao carregar resultados filtrados.");
+    } finally {
+      setResultsLoading(false);
+    }
+  }, [documentsOnly, jobId, resultOffset, resultQuery, resultSource]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    if (!["done", "paused", "aborted"].includes(phase)) return;
+    const timer = setTimeout(() => {
+      loadResults();
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [jobId, loadResults, phase]);
 
   // SGT debounced searches
   useEffect(() => {
@@ -625,6 +713,8 @@ export function PipelineTab() {
     setPhase("collecting");
     setPipelineState(INITIAL_PIPELINE);
     setRowCount(0);
+    setResultOffset(0);
+    setResultTotal(0);
 
     // Build payload for backend
     const payload: Record<string, unknown> = {
@@ -741,7 +831,13 @@ export function PipelineTab() {
     setPipelineState(INITIAL_PIPELINE);
     setSelectedRow(null);
     setRowCount(0);
+    setResultOffset(0);
+    setResultTotal(0);
   }
+
+  useEffect(() => {
+    setResultOffset(0);
+  }, [documentsOnly, resultQuery, resultSource]);
 
   // ─── Excel export (server-side) ──────────────────────────
 
@@ -759,6 +855,25 @@ export function PipelineTab() {
       URL.revokeObjectURL(url);
     } catch {
       setError("Erro ao exportar Excel.");
+    }
+  }
+
+  async function openRowDetail(row: PipelineRow) {
+    setSelectedRow(row);
+    if (!jobId || row.processual_data || row.publico_data) return;
+    setDetailLoadingNumero(row.numero_processo);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/pipeline/result/${jobId}/${encodeURIComponent(row.numero_processo)}`
+      );
+      const json = await res.json();
+      if (json.success && json.data) {
+        setSelectedRow(mapPipelineRow(json.data, row.id));
+      }
+    } catch {
+      setError("Erro ao carregar detalhe completo do processo.");
+    } finally {
+      setDetailLoadingNumero(null);
     }
   }
   // ─── count active pipeline filters ───────────────────────
@@ -792,6 +907,8 @@ export function PipelineTab() {
   const enrichedPublicoCount = pipelineState.stage3.current || 0;
 
   const previewRows = rows;
+  const currentStart = resultTotal > 0 ? resultOffset + 1 : 0;
+  const currentEnd = resultTotal > 0 ? Math.min(resultOffset + previewRows.length, resultTotal) : previewRows.length;
 
   const s1pct =
     pipelineState.stage1.total > 0
@@ -1466,14 +1583,17 @@ export function PipelineTab() {
         <div className="rounded-lg border border-border overflow-hidden">
           <div className="px-3 py-2 bg-muted/50 border-b border-border flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">
-              Prévia — últimos {previewRows.length} de {rowCount || rows.length} processos
-              {pipelineState.datajudGrandTotal > (rowCount || rows.length) && (
+              {["done", "paused", "aborted"].includes(phase)
+                ? `Resultados ${currentStart}-${currentEnd} de ${resultTotal || rowCount || rows.length} processos`
+                : `Prévia — últimos ${previewRows.length} de ${rowCount || rows.length} processos`}
+              {pipelineState.datajudGrandTotal > (rowCount || rows.length) && !["done", "paused", "aborted"].includes(phase) && (
                 <span className="ml-1 text-muted-foreground/60">
                   ({pipelineState.datajudGrandTotal.toLocaleString("pt-BR")} total no índice)
                 </span>
               )}
             </span>
             <div className="flex items-center gap-2">
+              {resultsLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
               <span className="text-[10px] text-muted-foreground hidden sm:block">
                 Clique em uma linha para ver detalhes completos
               </span>
@@ -1488,6 +1608,69 @@ export function PipelineTab() {
               </Button>
             </div>
           </div>
+          {["done", "paused", "aborted"].includes(phase) && (
+            <div className="px-3 py-3 border-b border-border bg-card">
+              <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_180px_auto] gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Filtro textual</Label>
+                  <Input
+                    value={resultQuery}
+                    onChange={(e) => setResultQuery(e.target.value)}
+                    placeholder="Número, parte, advogado, classe, órgão, assunto..."
+                    className="h-8 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Fonte enriquecida</Label>
+                  <Select value={resultSource} onValueChange={setResultSource}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Todos</SelectItem>
+                      <SelectItem value="processual">Com TRF1 Processual</SelectItem>
+                      <SelectItem value="publico">Com PJe público</SelectItem>
+                      <SelectItem value="both">Com TRF1 + PJe</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex items-end gap-2">
+                  <div className="flex items-center gap-2 h-8 px-3 rounded-md border border-border">
+                    <Switch checked={documentsOnly} onCheckedChange={setDocumentsOnly} />
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">Só com documentos</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-between mt-3">
+                <span className="text-[10px] text-muted-foreground">
+                  Página com {previewRows.length} itens carregados; a exportação continua levando todos os resultados do job.
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setResultOffset((prev) => Math.max(0, prev - RESULTS_PAGE_SIZE))}
+                    disabled={resultOffset === 0 || resultsLoading}
+                  >
+                    Anterior
+                  </Button>
+                  <span className="text-[10px] text-muted-foreground min-w-[88px] text-center">
+                    {currentStart}-{currentEnd} / {resultTotal || previewRows.length}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setResultOffset((prev) => prev + RESULTS_PAGE_SIZE)}
+                    disabled={resultsLoading || resultOffset + previewRows.length >= resultTotal}
+                  >
+                    Próxima
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
           <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead className="bg-muted/30 border-b border-border sticky top-0">
@@ -1539,7 +1722,7 @@ export function PipelineTab() {
                     row={row}
                     showProcessual={config.enrichProcessual}
                     showPublico={config.enrichPublico}
-                    onSelect={() => setSelectedRow(row)}
+                    onSelect={() => void openRowDetail(row)}
                   />
                 ))}
               </tbody>
@@ -1570,6 +1753,7 @@ export function PipelineTab() {
       {/* ── Row Detail Dialog ────────────────────────────── */}
       <RowDetailDialog
         row={selectedRow}
+        loading={detailLoadingNumero === selectedRow?.numero_processo}
         onClose={() => setSelectedRow(null)}
         showProcessual={config.enrichProcessual}
         showPublico={config.enrichPublico}
@@ -1582,24 +1766,30 @@ export function PipelineTab() {
 
 function RowDetailDialog({
   row,
+  loading,
   onClose,
   showProcessual,
   showPublico,
 }: {
   row: PipelineRow | null;
+  loading: boolean;
   onClose: () => void;
   showProcessual: boolean;
   showPublico: boolean;
 }) {
   if (!row) return null;
 
+  const processual = row.processual_data;
+  const publico = row.publico_data;
+
   return (
     <Dialog open={!!row} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-sm font-mono">
             <Hash className="w-4 h-4 text-primary" />
             {formatCNJ(row.numero_processo)}
+            {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
           </DialogTitle>
         </DialogHeader>
 
@@ -1688,12 +1878,45 @@ function RowDetailDialog({
 
               {row.processual_status === "found" ? (
                 <>
-                  <div className="grid grid-cols-2 gap-x-4">
-                    <DInfoRow label="Situação" value={row.situacao_processual} />
-                    <DInfoRow label="Qtd. Partes" value={String(row.qtd_partes)} />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
+                    <DInfoRow label="Situação" value={processual?.situacao || row.situacao_processual} />
+                    <DInfoRow label="Grupo" value={processual?.grupo || ""} />
+                    <DInfoRow label="Assunto" value={processual?.assunto || ""} />
+                    <DInfoRow label="Órgão Julgador" value={processual?.orgao_julgador || row.orgao_julgador} />
+                    <DInfoRow label="Juiz Relator" value={processual?.juiz_relator || ""} />
+                    <DInfoRow label="Autuação" value={processual?.data_autuacao || row.data_ajuizamento} />
+                    <DInfoRow label="Número antigo" value={processual?.numero || ""} />
+                    <DInfoRow label="Nova numeração" value={processual?.nova_numeracao || row.numero_processo} />
+                    <DInfoRow label="Processo originário" value={processual?.processo_originario || ""} />
+                    <DInfoRow label="Seção" value={processual?.secao || ""} />
                     <DInfoRow label="Polo Ativo" value={row.polo_ativo_nome} />
                     <DInfoRow label="Polo Passivo" value={row.polo_passivo_nome} />
                   </div>
+
+                  {processual && (processual.url_consulta || processual.url_inteiro_teor) && (
+                    <div className="flex flex-wrap gap-3 text-xs">
+                      {processual.url_consulta && (
+                        <a
+                          href={processual.url_consulta}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary hover:underline"
+                        >
+                          Abrir consulta processual
+                        </a>
+                      )}
+                      {processual.url_inteiro_teor && (
+                        <a
+                          href={processual.url_inteiro_teor}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary hover:underline"
+                        >
+                          Abrir inteiro teor
+                        </a>
+                      )}
+                    </div>
+                  )}
 
                   {/* Partes */}
                   {row.processual_partes.length > 0 && (
@@ -1722,6 +1945,28 @@ function RowDetailDialog({
                     </div>
                   )}
 
+                  {processual?.distribuicoes?.length ? (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <Calendar className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">
+                          Distribuições ({processual.distribuicoes.length})
+                        </span>
+                      </div>
+                      <div className="space-y-0.5 max-h-48 overflow-y-auto border border-border rounded-md">
+                        {processual.distribuicoes.map((item, i) => (
+                          <div key={i} className="px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-[10px] text-muted-foreground font-mono">{item.data}</span>
+                              {item.juiz && <span className="text-[10px] text-muted-foreground">{item.juiz}</span>}
+                            </div>
+                            <p className="text-xs mt-0.5">{item.descricao}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
                   {/* Movimentações */}
                   {row.processual_movimentacoes.length > 0 && (
                     <div>
@@ -1745,6 +1990,73 @@ function RowDetailDialog({
                       </div>
                     </div>
                   )}
+
+                  {processual?.peticoes?.length ? (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <FileText className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">Petições ({processual.peticoes.length})</span>
+                      </div>
+                      <div className="space-y-0.5 max-h-48 overflow-y-auto border border-border rounded-md">
+                        {processual.peticoes.map((item, i) => (
+                          <div key={i} className="px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                              {item.numero && <span>Nº {item.numero}</span>}
+                              {item.data_entrada && <span>Entrada: {item.data_entrada}</span>}
+                              {item.data_juntada && <span>Juntada: {item.data_juntada}</span>}
+                            </div>
+                            <p className="text-xs mt-0.5">{item.tipo}</p>
+                            {item.complemento && <p className="text-[10px] text-muted-foreground mt-0.5">{item.complemento}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {processual?.documentos?.length ? (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <FileText className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">Documentos ({processual.documentos.length})</span>
+                      </div>
+                      <div className="space-y-0.5 max-h-48 overflow-y-auto border border-border rounded-md">
+                        {processual.documentos.map((item, i) => (
+                          <div key={i} className="px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="text-xs">{item.descricao}</p>
+                              {item.data && <span className="text-[10px] text-muted-foreground font-mono">{item.data}</span>}
+                            </div>
+                            {item.url && (
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[10px] text-primary hover:underline"
+                              >
+                                Abrir documento
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {processual?.incidentes?.length ? (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <AlertCircle className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">Incidentes ({processual.incidentes.length})</span>
+                      </div>
+                      <div className="border border-border rounded-md divide-y divide-border/40">
+                        {processual.incidentes.map((item, i) => (
+                          <div key={i} className="px-3 py-2 text-xs">
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 <div className="text-center py-6 text-muted-foreground">
@@ -1776,12 +2088,41 @@ function RowDetailDialog({
 
               {row.publico_status === "found" ? (
                 <>
-                  <div className="grid grid-cols-2 gap-x-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
+                    <DInfoRow label="Classe" value={publico?.classe || row.classe} />
+                    <DInfoRow label="Assunto" value={publico?.assunto || ""} />
                     <DInfoRow label="Valor da Causa" value={row.valor_causa} />
                     <DInfoRow label="Situação PJe" value={row.situacao_publico} />
                     <DInfoRow label="Órgão Julgador" value={row.orgao_julgador_pje} />
                     <DInfoRow label="Distribuição" value={row.data_distribuicao_pje} />
+                    <DInfoRow label="Jurisdição" value={publico?.jurisdicao || ""} />
+                    <DInfoRow label="Processo referência" value={publico?.processo_referencia || ""} />
+                    <DInfoRow label="Polo ativo (resumo)" value={publico?.polo_ativo || ""} />
+                    <DInfoRow label="Polo passivo (resumo)" value={publico?.polo_passivo || ""} />
+                    <DInfoRow label="Outros interessados" value={publico?.outros_interessados || ""} />
+                    <DInfoRow label="Endereço do órgão" value={publico?.endereco_orgao_julgador || ""} />
                   </div>
+
+                  {publico && (publico.url_detalhes || publico.advogados_resumo) && (
+                    <div className="space-y-2">
+                      {publico.advogados_resumo && (
+                        <p className="text-xs text-muted-foreground">
+                          <span className="font-medium text-foreground">Advogados (resumo): </span>
+                          {publico.advogados_resumo}
+                        </p>
+                      )}
+                      {publico.url_detalhes && (
+                        <a
+                          href={publico.url_detalhes}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-primary hover:underline"
+                        >
+                          Abrir processo no PJe
+                        </a>
+                      )}
+                    </div>
+                  )}
 
                   {/* Partes PJe */}
                   {row.publico_partes.length > 0 && (
@@ -1832,6 +2173,62 @@ function RowDetailDialog({
                       </div>
                     </div>
                   )}
+
+                  {publico?.documentos?.length ? (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <FileText className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs font-medium">
+                          Documentos PJe ({publico.documentos.length})
+                        </span>
+                      </div>
+                      <div className="space-y-0.5 max-h-72 overflow-y-auto border border-border rounded-md">
+                        {publico.documentos.map((doc, i) => (
+                          <div key={i} className="px-3 py-2 border-b border-border/40 last:border-0 hover:bg-muted/20">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                              {doc.data_hora && (
+                                <span className="text-[10px] text-muted-foreground font-mono">{doc.data_hora}</span>
+                              )}
+                              {doc.documento && <span className="text-xs">{doc.documento}</span>}
+                              {doc.certidao && <Badge variant="outline" className="text-[9px]">{doc.certidao}</Badge>}
+                            </div>
+                            <div className="flex flex-wrap gap-3 mt-1">
+                              {doc.url_documento && (
+                                <a
+                                  href={doc.url_documento}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[10px] text-primary hover:underline"
+                                >
+                                  Abrir documento
+                                </a>
+                              )}
+                              {doc.url_certidao && (
+                                <a
+                                  href={doc.url_certidao}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[10px] text-primary hover:underline"
+                                >
+                                  Abrir certidão
+                                </a>
+                              )}
+                            </div>
+                            {(doc.texto_documento || doc.texto_certidao) && (
+                              <details className="mt-2">
+                                <summary className="text-[10px] text-muted-foreground cursor-pointer">
+                                  Prévia do texto extraído
+                                </summary>
+                                <pre className="mt-1 whitespace-pre-wrap text-[10px] text-muted-foreground bg-muted/40 rounded-md p-2">
+                                  {(doc.texto_documento || doc.texto_certidao || "").slice(0, 1600)}
+                                </pre>
+                              </details>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 <div className="text-center py-6 text-muted-foreground">

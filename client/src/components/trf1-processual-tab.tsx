@@ -71,7 +71,7 @@ export function TRF1ProcessualTab() {
     try {
       const res = await apiRequest(
         "GET",
-        `/api/processo?numero=${encodeURIComponent(r.numero)}&secao=${encodeURIComponent(r.secao || "TRF1")}`
+        `/api/processo?numero=${encodeURIComponent(r.numero)}&secao=${encodeURIComponent(r.secao || "TRF1")}&url=${encodeURIComponent(r.url || "")}`
       );
       const json = await res.json();
       if (json.success && json.data) {

@@ -28,6 +28,11 @@ export function ResultadosList({ resultados, onSelect }: ResultadosListProps) {
               {r.nome_parte && (
                 <p className="text-xs text-muted-foreground truncate">{r.nome_parte}</p>
               )}
+              {r.processo_originario && (
+                <p className="text-[11px] text-muted-foreground/80 truncate">
+                  Origem: {r.processo_originario}
+                </p>
+              )}
             </div>
             <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-foreground transition-colors flex-shrink-0" />
           </button>

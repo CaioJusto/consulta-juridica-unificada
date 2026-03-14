@@ -1592,6 +1592,7 @@ function PublicoSection({ data }: { data: TRF1PublicProcess }) {
         <TabsList className="flex flex-wrap h-auto gap-1 bg-transparent p-0 mb-4">
           <TabBtn value="partes" icon={Users} label="Partes" count={data.partes.length} />
           <TabBtn value="movimentacoes" icon={ArrowRightLeft} label="Movimentações" count={data.movimentacoes.length} />
+          <TabBtn value="docs" icon={FileText} label="Documentos" count={data.documentos?.length ?? 0} />
           <TabBtn value="dados" icon={Info} label="Dados" />
         </TabsList>
         <TabsContent value="partes">
@@ -1631,14 +1632,38 @@ function PublicoSection({ data }: { data: TRF1PublicProcess }) {
             </div>
           )}
         </TabsContent>
+        <TabsContent value="docs">
+          {!data.documentos || data.documentos.length === 0 ? <EmptyTab text="Nenhum documento" /> : (
+            <div className="space-y-2">
+              {data.documentos.map((doc, i) => (
+                <div key={i} className="bg-muted/30 rounded-md p-3">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    {doc.data_hora && <Badge variant="outline" className="text-[10px]">{doc.data_hora}</Badge>}
+                    {doc.certidao && <Badge variant="secondary" className="text-[10px]">{doc.certidao}</Badge>}
+                  </div>
+                  <p className="text-sm font-medium">{doc.documento || "Documento"}</p>
+                  <div className="flex gap-3 mt-1">
+                    {doc.url_documento && <a href={doc.url_documento} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">Abrir documento</a>}
+                    {doc.url_certidao && <a href={doc.url_certidao} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">Abrir certidão</a>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </TabsContent>
         <TabsContent value="dados">
           <InfoRow label="Processo" value={data.numero_processo} icon={Hash} />
           <InfoRow label="Classe" value={data.classe} icon={FileText} />
           <InfoRow label="Assunto" value={data.assunto} icon={FileText} />
           <InfoRow label="Órgão Julgador" value={data.orgao_julgador} icon={Building2} />
+          <InfoRow label="Jurisdição" value={data.jurisdicao || ""} icon={Building2} />
           <InfoRow label="Distribuição" value={data.data_distribuicao} icon={Calendar} />
           <InfoRow label="Valor da Causa" value={data.valor_causa} icon={DollarSign} />
           <InfoRow label="Situação" value={data.situacao} icon={Info} />
+          <InfoRow label="Processo referência" value={data.processo_referencia || ""} icon={Hash} />
+          <InfoRow label="Polo ativo (resumo)" value={data.polo_ativo || ""} icon={Users} />
+          <InfoRow label="Polo passivo (resumo)" value={data.polo_passivo || ""} icon={Users} />
+          <InfoRow label="Advogados (resumo)" value={data.advogados_resumo || ""} icon={Users} />
         </TabsContent>
       </Tabs>
     </div>

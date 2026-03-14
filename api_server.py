@@ -32,7 +32,7 @@ import requests
 from fastapi import FastAPI, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import asdict
-from trf1_client import TRF1Client, formatar_numero_processo
+from trf1_client import TRF1Client, TRF1SearchTooBroadError, formatar_numero_processo
 
 app = FastAPI()
 app.add_middleware(
@@ -117,13 +117,16 @@ def config_status():
 
 @app.get("/api/processo")
 def buscar_processo(
-    numero: str = Query(..., description="Número do processo"),
+    numero: str = Query("", description="Número do processo"),
     secao: str = Query("TRF1", description="Seção judiciária"),
+    url: str = Query("", description="URL direta do processo no portal processual"),
 ):
     from fastapi.responses import JSONResponse
     try:
+        if not numero.strip() and not url.strip():
+            return {"success": False, "error": "Informe o número do processo ou uma URL direta"}
         client = TRF1Client(secao=secao, timeout=30)
-        proc = client.buscar_por_numero(numero)
+        proc = client.buscar_por_url(url.strip()) if url.strip() else client.buscar_por_numero(numero)
         if proc is None:
             return {"success": False, "error": "Processo não encontrado"}
         return {"success": True, "data": proc.to_dict()}
@@ -160,10 +163,15 @@ def buscar_lista(
         else:
             return {"success": False, "error": "Tipo de busca inválido"}
 
+        if not resultados:
+            return {"success": False, "error": "Nenhum resultado encontrado"}
+
         return {
             "success": True,
             "data": [asdict(r) for r in resultados],
         }
+    except TRF1SearchTooBroadError as e:
+        return {"success": False, "error": str(e) or "Pesquisa ampla demais. Refine o termo informado."}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError, TimeoutError) as e:
         from fastapi.responses import JSONResponse
         logger.warning("TRF1 Processual indisponível: %s", e)
@@ -811,6 +819,111 @@ def _format_cnj(raw: str) -> str:
     return raw
 
 
+def _build_trf1_public_process_payload(
+    row: dict[str, Any],
+    *,
+    party_rows: list[dict[str, Any]],
+    lawyer_rows: list[dict[str, Any]],
+    event_rows: list[dict[str, Any]],
+    document_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    numero = row.get("numero_processo", "")
+
+    partes = []
+    for p in party_rows:
+        if p.get("numero_processo") != numero:
+            continue
+        related_lawyers = [
+            lawyer for lawyer in lawyer_rows
+            if lawyer.get("numero_processo") == numero
+            and lawyer.get("polo") == p.get("polo")
+        ]
+        partes.append(
+            {
+                "nome": p.get("nome", ""),
+                "polo": p.get("polo", ""),
+                "tipo_participacao": p.get("tipo_registro", ""),
+                "documentos": p.get("documento", ""),
+                "advogados": " | ".join(
+                    filter(
+                        None,
+                        [
+                            f"{lawyer.get('nome_advogado', '')} ({lawyer.get('oab_formatada', '')})".strip(" ()")
+                            for lawyer in related_lawyers
+                        ],
+                    )
+                ),
+                "documento": p.get("documento", ""),
+                "documento_tipo": p.get("documento_tipo", ""),
+                "papel": p.get("papel", ""),
+                "situacao": p.get("situacao", ""),
+                "observacao": p.get("observacao", ""),
+                "texto_original": p.get("texto_original", ""),
+            }
+        )
+
+    movimentacoes = []
+    for m in event_rows:
+        if m.get("numero_processo") != numero:
+            continue
+        movimentacoes.append(
+            {
+                "data": m.get("data_hora", ""),
+                "tipo": m.get("evento", ""),
+                "descricao": m.get("documento_resumo", "") or m.get("evento", ""),
+                "documentos": [value for value in [m.get("documento_resumo", "")] if value],
+                "documento_url": m.get("documento_url", ""),
+            }
+        )
+
+    documentos = []
+    for d in document_rows:
+        if d.get("numero_processo") != numero:
+            continue
+        documentos.append(
+            {
+                "ordem": d.get("ordem", ""),
+                "data_hora": d.get("data_hora", ""),
+                "documento": d.get("documento", ""),
+                "certidao": d.get("certidao", ""),
+                "url_documento": d.get("url_documento", ""),
+                "url_certidao": d.get("url_certidao", ""),
+                "texto_documento": d.get("texto_documento", ""),
+                "texto_certidao": d.get("texto_certidao", ""),
+            }
+        )
+
+    return {
+        "numero_processo": numero,
+        "classe": row.get("classe", ""),
+        "classe_codigo": row.get("classe_codigo", ""),
+        "assunto": row.get("assuntos", ""),
+        "orgao_julgador": row.get("orgao_julgador", ""),
+        "jurisdicao": row.get("jurisdicao", ""),
+        "endereco_orgao_julgador": row.get("endereco_orgao_julgador", ""),
+        "data_distribuicao": row.get("data_distribuicao", ""),
+        "valor_causa": row.get("valor_causa", ""),
+        "situacao": row.get("ultimo_evento", "") or row.get("ultima_movimentacao_resultado", ""),
+        "processo_referencia": row.get("processo_referencia", ""),
+        "polo_ativo": row.get("polo_ativo", ""),
+        "polo_passivo": row.get("polo_passivo", ""),
+        "outros_interessados": row.get("outros_interessados", ""),
+        "advogados_resumo": row.get("advogados_resumo", ""),
+        "quantidade_partes": row.get("quantidade_partes", 0),
+        "quantidade_advogados": row.get("quantidade_advogados", 0),
+        "quantidade_eventos": row.get("quantidade_eventos", 0),
+        "quantidade_documentos": row.get("quantidade_documentos", 0),
+        "cessao_credito": row.get("cessao_credito", ""),
+        "cessao_detalhes": row.get("cessao_detalhes", ""),
+        "partes_cedentes": row.get("partes_cedentes", ""),
+        "partes_nao_cedentes": row.get("partes_nao_cedentes", ""),
+        "partes": partes,
+        "movimentacoes": movimentacoes,
+        "documentos": documentos,
+        "url_detalhes": row.get("fonte_url", ""),
+    }
+
+
 @app.get("/api/trf1publico/buscar")
 def trf1_publico_buscar(
     numero: str = Query("", description="Número do processo"),
@@ -848,44 +961,16 @@ def trf1_publico_buscar(
 
         bundle = search_trf1_public_bundle(params, max_details=10)
 
-        processos = []
-        for row in bundle.process_rows:
-            partes = []
-            for p in bundle.party_rows:
-                if p.get("numero_processo") == row.get("numero_processo"):
-                    partes.append({
-                        "nome": p.get("nome", ""),
-                        "polo": p.get("polo", ""),
-                        "tipo_participacao": p.get("tipo_participacao", ""),
-                        "documentos": p.get("documentos", ""),
-                        "advogados": p.get("advogados", ""),
-                    })
-
-            movs = []
-            for m in bundle.event_rows:
-                if m.get("numero_processo") == row.get("numero_processo"):
-                    movs.append({
-                        "data": m.get("data_hora", ""),
-                        "tipo": m.get("evento", ""),
-                        "descricao": m.get("descricao", ""),
-                        "documentos": [
-                            d for d in [m.get("documento_resumo", "")]
-                            if d
-                        ],
-                    })
-
-            processos.append({
-                "numero_processo": row.get("numero_processo", ""),
-                "classe": row.get("classe", ""),
-                "assunto": row.get("assunto", ""),
-                "orgao_julgador": row.get("orgao_julgador", ""),
-                "data_distribuicao": row.get("data_distribuicao", ""),
-                "valor_causa": row.get("valor_causa", ""),
-                "situacao": row.get("situacao", ""),
-                "partes": partes,
-                "movimentacoes": movs,
-                "url_detalhes": row.get("url_detalhes", ""),
-            })
+        processos = [
+            _build_trf1_public_process_payload(
+                row,
+                party_rows=bundle.party_rows,
+                lawyer_rows=bundle.lawyer_rows,
+                event_rows=bundle.event_rows,
+                document_rows=bundle.document_rows,
+            )
+            for row in bundle.process_rows
+        ]
 
         return {
             "success": True,
@@ -938,6 +1023,275 @@ def _save_jobs() -> None:
 
 _load_jobs()
 _atexit.register(_save_jobs)
+
+
+def _active_passive_names(partes: list[dict[str, Any]]) -> tuple[str, str]:
+    ativos = [p.get("nome", "") for p in partes if "AT" in str(p.get("tipo", "")).upper()]
+    passivos = [p.get("nome", "") for p in partes if "PASS" in str(p.get("tipo", "")).upper()]
+    return " | ".join(filter(None, ativos[:5])), " | ".join(filter(None, passivos[:5]))
+
+
+def _advogado_names(partes: list[dict[str, Any]]) -> str:
+    advogados = [p.get("nome", "") for p in partes if p.get("oab")]
+    return " | ".join(filter(None, advogados[:5]))
+
+
+def _flatten_processual_process(proc: dict[str, Any]) -> dict[str, Any]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return {
+        "numero_processo": numero,
+        "numero_antigo": proc.get("numero", ""),
+        "nova_numeracao": proc.get("nova_numeracao", ""),
+        "grupo": proc.get("grupo", ""),
+        "assunto": proc.get("assunto", ""),
+        "data_autuacao": proc.get("data_autuacao", ""),
+        "orgao_julgador": proc.get("orgao_julgador", ""),
+        "juiz_relator": proc.get("juiz_relator", ""),
+        "processo_originario": proc.get("processo_originario", ""),
+        "situacao": proc.get("situacao", ""),
+        "url_consulta": proc.get("url_consulta", ""),
+        "url_inteiro_teor": proc.get("url_inteiro_teor", ""),
+        "secao": proc.get("secao", ""),
+        "quantidade_partes": len(proc.get("partes", []) or []),
+        "quantidade_movimentacoes": len(proc.get("movimentacoes", []) or []),
+        "quantidade_distribuicoes": len(proc.get("distribuicoes", []) or []),
+        "quantidade_peticoes": len(proc.get("peticoes", []) or []),
+        "quantidade_documentos": len(proc.get("documentos", []) or []),
+        "quantidade_incidentes": len(proc.get("incidentes", []) or []),
+        "json_bruto": json.dumps(proc, ensure_ascii=False),
+    }
+
+
+def _flatten_processual_partes(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return [
+        {
+            "numero_processo": numero,
+            "ordem": index,
+            "tipo": parte.get("tipo", ""),
+            "nome": parte.get("nome", ""),
+            "entidade": parte.get("entidade", ""),
+            "oab": parte.get("oab", ""),
+            "caracteristica": parte.get("caracteristica", ""),
+        }
+        for index, parte in enumerate(proc.get("partes", []) or [], start=1)
+    ]
+
+
+def _flatten_processual_movimentacoes(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return [
+        {
+            "numero_processo": numero,
+            "ordem": index,
+            "data": mov.get("data", ""),
+            "codigo": mov.get("codigo", ""),
+            "descricao": mov.get("descricao", ""),
+            "complemento": mov.get("complemento", ""),
+        }
+        for index, mov in enumerate(proc.get("movimentacoes", []) or [], start=1)
+    ]
+
+
+def _flatten_processual_distribuicoes(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return [
+        {
+            "numero_processo": numero,
+            "ordem": index,
+            "data": item.get("data", ""),
+            "descricao": item.get("descricao", ""),
+            "juiz": item.get("juiz", ""),
+        }
+        for index, item in enumerate(proc.get("distribuicoes", []) or [], start=1)
+    ]
+
+
+def _flatten_processual_peticoes(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return [
+        {
+            "numero_processo": numero,
+            "ordem": index,
+            "numero": item.get("numero", ""),
+            "data_entrada": item.get("data_entrada", ""),
+            "data_juntada": item.get("data_juntada", ""),
+            "tipo": item.get("tipo", ""),
+            "complemento": item.get("complemento", ""),
+        }
+        for index, item in enumerate(proc.get("peticoes", []) or [], start=1)
+    ]
+
+
+def _flatten_processual_documentos(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return [
+        {
+            "numero_processo": numero,
+            "ordem": index,
+            "descricao": item.get("descricao", ""),
+            "data": item.get("data", ""),
+            "url": item.get("url", ""),
+        }
+        for index, item in enumerate(proc.get("documentos", []) or [], start=1)
+    ]
+
+
+def _flatten_processual_incidentes(proc: dict[str, Any]) -> list[dict[str, Any]]:
+    numero = proc.get("nova_numeracao") or proc.get("numero") or ""
+    return [
+        {
+            "numero_processo": numero,
+            "ordem": index,
+            "descricao": item,
+        }
+        for index, item in enumerate(proc.get("incidentes", []) or [], start=1)
+    ]
+
+
+def _pipeline_status_for_row(
+    row: dict[str, Any],
+    *,
+    processual_enabled: bool,
+    publico_enabled: bool,
+    processual_not_found: set[str],
+    publico_not_found: set[str],
+) -> tuple[str, str]:
+    numero = row.get("numero_processo", "")
+    processual_status = (
+        "found"
+        if row.get("processual_data")
+        else "not_found"
+        if numero in processual_not_found
+        else "pending"
+        if processual_enabled
+        else "skipped"
+    )
+    publico_status = (
+        "found"
+        if row.get("publico_data")
+        else "not_found"
+        if numero in publico_not_found
+        else "pending"
+        if publico_enabled
+        else "skipped"
+    )
+    return processual_status, publico_status
+
+
+def _pipeline_row_summary(
+    row: dict[str, Any],
+    *,
+    processual_enabled: bool,
+    publico_enabled: bool,
+    processual_not_found: set[str],
+    publico_not_found: set[str],
+) -> dict[str, Any]:
+    processual_status, publico_status = _pipeline_status_for_row(
+        row,
+        processual_enabled=processual_enabled,
+        publico_enabled=publico_enabled,
+        processual_not_found=processual_not_found,
+        publico_not_found=publico_not_found,
+    )
+    processual_data = row.get("processual_data") or {}
+    publico_data = row.get("publico_data") or {}
+    return {
+        "numero_processo": row.get("numero_processo", ""),
+        "tribunal": row.get("tribunal", ""),
+        "classe": row.get("classe", ""),
+        "orgao_julgador": row.get("orgao_julgador", ""),
+        "grau": row.get("grau", ""),
+        "data_ajuizamento": row.get("data_ajuizamento", ""),
+        "ultima_atualizacao": row.get("ultima_atualizacao", ""),
+        "assuntos": row.get("assuntos", ""),
+        "qtd_movimentos": row.get("qtd_movimentos", 0),
+        "ultima_movimentacao": row.get("ultima_movimentacao", ""),
+        "polo_ativo_nome": row.get("polo_ativo_nome", ""),
+        "polo_passivo_nome": row.get("polo_passivo_nome", ""),
+        "advogados": row.get("advogados", ""),
+        "situacao_processual": row.get("situacao_processual", ""),
+        "valor_causa": row.get("valor_causa", ""),
+        "situacao_pje": row.get("situacao_pje", ""),
+        "orgao_julgador_pje": row.get("orgao_julgador_pje", ""),
+        "processual_status": processual_status,
+        "publico_status": publico_status,
+        "processual_qtd_partes": len(processual_data.get("partes", []) or []),
+        "processual_qtd_movimentacoes": len(processual_data.get("movimentacoes", []) or []),
+        "processual_qtd_distribuicoes": len(processual_data.get("distribuicoes", []) or []),
+        "processual_qtd_peticoes": len(processual_data.get("peticoes", []) or []),
+        "processual_qtd_documentos": len(processual_data.get("documentos", []) or []),
+        "processual_qtd_incidentes": len(processual_data.get("incidentes", []) or []),
+        "publico_qtd_partes": len(publico_data.get("partes", []) or []),
+        "publico_qtd_movimentacoes": len(publico_data.get("movimentacoes", []) or []),
+        "publico_qtd_documentos": len(publico_data.get("documentos", []) or []),
+    }
+
+
+def _pipeline_row_detail(
+    row: dict[str, Any],
+    *,
+    processual_enabled: bool,
+    publico_enabled: bool,
+    processual_not_found: set[str],
+    publico_not_found: set[str],
+) -> dict[str, Any]:
+    detail = dict(row)
+    processual_status, publico_status = _pipeline_status_for_row(
+        row,
+        processual_enabled=processual_enabled,
+        publico_enabled=publico_enabled,
+        processual_not_found=processual_not_found,
+        publico_not_found=publico_not_found,
+    )
+    detail["processual_status"] = processual_status
+    detail["publico_status"] = publico_status
+    detail["processual_data"] = row.get("processual_data") or None
+    detail["publico_data"] = row.get("publico_data") or None
+    return detail
+
+
+def _pipeline_search_blob(row: dict[str, Any]) -> str:
+    processual_data = row.get("processual_data") or {}
+    publico_data = row.get("publico_data") or {}
+    processual_partes = " ".join(
+        str(p.get("nome", ""))
+        for p in processual_data.get("partes", []) or []
+    )
+    publico_partes = " ".join(
+        str(p.get("nome", ""))
+        for p in publico_data.get("partes", []) or []
+    )
+    publico_documentos = " ".join(
+        " ".join(
+            filter(
+                None,
+                [
+                    str(d.get("documento", "")),
+                    str(d.get("certidao", "")),
+                ],
+            )
+        )
+        for d in publico_data.get("documentos", []) or []
+    )
+    values = [
+        row.get("numero_processo", ""),
+        row.get("classe", ""),
+        row.get("orgao_julgador", ""),
+        row.get("grau", ""),
+        row.get("assuntos", ""),
+        row.get("polo_ativo_nome", ""),
+        row.get("polo_passivo_nome", ""),
+        row.get("advogados", ""),
+        row.get("situacao_processual", ""),
+        row.get("valor_causa", ""),
+        row.get("situacao_pje", ""),
+        row.get("orgao_julgador_pje", ""),
+        processual_partes,
+        publico_partes,
+        publico_documentos,
+    ]
+    return " ".join(str(v) for v in values if v).lower()
 
 
 def _run_pipeline(job_id: str) -> None:
@@ -1121,6 +1475,8 @@ def _run_pipeline(job_id: str) -> None:
                     "valor_causa": "",
                     "situacao_pje": "",
                     "orgao_julgador_pje": "",
+                    "processual_data": None,
+                    "publico_data": None,
                 }
                 collected_rows.append(row)
                 job["rows"].append(row)
@@ -1148,60 +1504,74 @@ def _run_pipeline(job_id: str) -> None:
         enrich_publico = config.get("enrich_publico", False)
 
         if enrich_processual:
-            job["progress"]["stage"] = "enriching"
-            from datajud_app.official_sources import enrich_from_official_sources
-
-            query_rows_official = [
-                {
-                    "source_row": {"numero_processo": row["numero_processo"]},
-                    "linha_origem": i,
-                    "numero_processo": row["numero_processo"],
-                    "tribunal_alias": tribunal_alias,
-                    "tribunal_alias_informado": tribunal_alias,
-                }
-                for i, row in enumerate(collected_rows, start=1)
-            ]
-
-            prog_lock = threading.Lock()
-
-            def on_enrich_progress(current: int, total: int, message: str) -> None:
-                with prog_lock:
-                    job["progress"]["enriched_processual"] = current
-
-            official_result = enrich_from_official_sources(
-                query_rows_official,
-                on_progress=on_enrich_progress,
-            )
-
-            # Persist result lists in job (JSON-serializable dicts)
+            job["progress"]["stage"] = "enriching_processual"
             include_documents = config.get("include_documents", True)
-            job["official_process_rows"] = official_result.process_rows
-            job["official_party_rows"] = official_result.party_rows
-            job["official_lawyer_rows"] = official_result.lawyer_rows
-            job["official_event_rows"] = official_result.event_rows
-            # If include_documents=False, strip texto_documento/texto_certidao to save memory
-            doc_rows = official_result.document_rows
-            if not include_documents:
-                for dr in doc_rows:
-                    dr.pop("texto_documento", None)
-                    dr.pop("texto_certidao", None)
-            job["official_document_rows"] = doc_rows
-            job["official_not_found_rows"] = official_result.not_found_rows
-            job["progress"]["enriched_processual"] = len(official_result.process_rows)
-            job["progress"]["not_found_count"] = len(official_result.not_found_rows)
-            job["progress"]["error_details"] = official_result.errors[:20]  # keep first 20
-            job["progress"]["errors"] = job["progress"].get("errors", 0) + len(official_result.errors)
+            processual_client = TRF1Client(secao="TRF1", timeout=30)
 
-            # Update preview rows with official data
-            for row in collected_rows:
-                key = (tribunal_alias, row["numero_processo"])
-                official_proc = official_result.process_map.get(key)
-                if official_proc:
-                    row["polo_ativo_nome"] = official_proc.get("polo_ativo", "") or ""
-                    row["polo_passivo_nome"] = official_proc.get("polo_passivo", "") or ""
-                    row["advogados"] = official_proc.get("advogados_resumo", "") or ""
-                    # TRF1 doesn't have explicit situação — use last event as proxy
-                    row["situacao_processual"] = official_proc.get("ultimo_evento", "") or ""
+            processual_process_rows: list[dict[str, Any]] = []
+            processual_party_rows: list[dict[str, Any]] = []
+            processual_event_rows: list[dict[str, Any]] = []
+            processual_distribution_rows: list[dict[str, Any]] = []
+            processual_petition_rows: list[dict[str, Any]] = []
+            processual_document_rows: list[dict[str, Any]] = []
+            processual_incident_rows: list[dict[str, Any]] = []
+            processual_not_found_rows: list[dict[str, Any]] = []
+            processual_errors: list[str] = []
+
+            for index, row in enumerate(collected_rows, start=1):
+                if job["status"] == "stopped":
+                    return
+                while job["status"] == "paused":
+                    time.sleep(0.5)
+
+                try:
+                    formatted = formatar_numero_processo(row["numero_processo"])
+                    proc = processual_client.buscar_por_numero(formatted)
+                    if proc is None:
+                        processual_not_found_rows.append(
+                            {
+                                "numero_processo": row["numero_processo"],
+                                "tribunal": tribunal_alias,
+                                "secao": "TRF1",
+                            }
+                        )
+                    else:
+                        proc_dict = proc.to_dict()
+                        if not include_documents:
+                            proc_dict["documentos"] = []
+
+                        ativos, passivos = _active_passive_names(proc_dict.get("partes", []))
+                        row["polo_ativo_nome"] = ativos
+                        row["polo_passivo_nome"] = passivos
+                        row["advogados"] = _advogado_names(proc_dict.get("partes", []))
+                        row["situacao_processual"] = proc_dict.get("situacao", "")
+                        row["processual_data"] = proc_dict
+                        row["processual_partes"] = proc_dict.get("partes", [])
+                        row["processual_movimentacoes"] = proc_dict.get("movimentacoes", [])
+
+                        processual_process_rows.append(_flatten_processual_process(proc_dict))
+                        processual_party_rows.extend(_flatten_processual_partes(proc_dict))
+                        processual_event_rows.extend(_flatten_processual_movimentacoes(proc_dict))
+                        processual_distribution_rows.extend(_flatten_processual_distribuicoes(proc_dict))
+                        processual_petition_rows.extend(_flatten_processual_peticoes(proc_dict))
+                        processual_document_rows.extend(_flatten_processual_documentos(proc_dict))
+                        processual_incident_rows.extend(_flatten_processual_incidentes(proc_dict))
+                except Exception as exc:
+                    processual_errors.append(f"{row['numero_processo']}: {exc}")
+                    job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
+
+                job["progress"]["enriched_processual"] = index
+
+            job["processual_process_rows"] = processual_process_rows
+            job["processual_party_rows"] = processual_party_rows
+            job["processual_event_rows"] = processual_event_rows
+            job["processual_distribution_rows"] = processual_distribution_rows
+            job["processual_petition_rows"] = processual_petition_rows
+            job["processual_document_rows"] = processual_document_rows
+            job["processual_incident_rows"] = processual_incident_rows
+            job["processual_not_found_rows"] = processual_not_found_rows
+            job["progress"]["not_found_count"] = len(processual_not_found_rows)
+            job["progress"]["error_details"] = processual_errors[:20]
 
         if job["status"] == "stopped":
             return
@@ -1209,7 +1579,7 @@ def _run_pipeline(job_id: str) -> None:
         # ── Stage 3: TRF1 Público enrichment ─────────────────────
 
         if enrich_publico:
-            job["progress"]["stage"] = "enriching"
+            job["progress"]["stage"] = "enriching_publico"
             batch_size = max(1, int(config.get("batch_size", 8)) // 2)
 
             try:
@@ -1221,6 +1591,14 @@ def _run_pipeline(job_id: str) -> None:
                 publico_available = False
 
             if publico_available:
+                include_documents = config.get("include_documents", True)
+                public_process_rows: list[dict[str, Any]] = []
+                public_party_rows: list[dict[str, Any]] = []
+                public_lawyer_rows: list[dict[str, Any]] = []
+                public_event_rows: list[dict[str, Any]] = []
+                public_document_rows: list[dict[str, Any]] = []
+                public_not_found_rows: list[dict[str, Any]] = []
+
                 for i, row in enumerate(collected_rows):
                     if job["status"] == "stopped":
                         return
@@ -1244,15 +1622,51 @@ def _run_pipeline(job_id: str) -> None:
                         bundle = search_trf1_public_bundle(params, max_details=1)
                         if bundle.process_rows:
                             pub = bundle.process_rows[0]
-                            row["valor_causa"] = pub.get("valor_causa", "")
-                            row["situacao_pje"] = pub.get("situacao", "")
-                            row["orgao_julgador_pje"] = pub.get("orgao_julgador", "")
+                            if not include_documents:
+                                for document_row in bundle.document_rows:
+                                    document_row.pop("texto_documento", None)
+                                    document_row.pop("texto_certidao", None)
+
+                            public_process_rows.extend(bundle.process_rows)
+                            public_party_rows.extend(bundle.party_rows)
+                            public_lawyer_rows.extend(bundle.lawyer_rows)
+                            public_event_rows.extend(bundle.event_rows)
+                            public_document_rows.extend(bundle.document_rows)
+
+                            public_payload = _build_trf1_public_process_payload(
+                                pub,
+                                party_rows=bundle.party_rows,
+                                lawyer_rows=bundle.lawyer_rows,
+                                event_rows=bundle.event_rows,
+                                document_rows=bundle.document_rows,
+                            )
+                            row["valor_causa"] = public_payload.get("valor_causa", "")
+                            row["situacao_pje"] = public_payload.get("situacao", "")
+                            row["orgao_julgador_pje"] = public_payload.get("orgao_julgador", "")
+                            row["publico_data"] = public_payload
+                            row["publico_partes"] = public_payload.get("partes", [])
+                            row["publico_movimentacoes"] = public_payload.get("movimentacoes", [])
+                        else:
+                            public_not_found_rows.append(
+                                {
+                                    "numero_processo": row["numero_processo"],
+                                    "tribunal": tribunal_alias,
+                                    "detalhe": "Processo nao encontrado na consulta publica PJe.",
+                                }
+                            )
                     except Exception:
                         job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
 
                     job["progress"]["enriched_publico"] = i + 1
                     if (i + 1) % batch_size == 0:
                         time.sleep(0.5)
+
+                job["official_process_rows"] = public_process_rows
+                job["official_party_rows"] = public_party_rows
+                job["official_lawyer_rows"] = public_lawyer_rows
+                job["official_event_rows"] = public_event_rows
+                job["official_document_rows"] = public_document_rows
+                job["official_not_found_rows"] = public_not_found_rows
 
         job["status"] = "done"
         job["progress"]["stage"] = "done"
@@ -1286,6 +1700,14 @@ def pipeline_start(payload: dict = Body(...)):
         },
         "rows": [],
         "raw_sources": [],
+        "processual_process_rows": [],
+        "processual_party_rows": [],
+        "processual_event_rows": [],
+        "processual_distribution_rows": [],
+        "processual_petition_rows": [],
+        "processual_document_rows": [],
+        "processual_incident_rows": [],
+        "processual_not_found_rows": [],
         "official_process_rows": [],
         "official_party_rows": [],
         "official_lawyer_rows": [],
@@ -1315,6 +1737,122 @@ def pipeline_status(job_id: str):
             "error": job.get("error"),
         }
     }
+
+
+@app.get("/api/pipeline/results/{job_id}")
+def pipeline_results(
+    job_id: str,
+    q: str = Query("", description="Filtro textual"),
+    source: str = Query("all", description="all | processual | publico | both"),
+    documents_only: bool = Query(False, description="Mostrar apenas processos com documentos"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """List filtered pipeline rows with lightweight summaries for the frontend."""
+    job = jobs.get(job_id)
+    if not job:
+        return {"success": False, "error": "Job not found"}
+
+    processual_enabled = bool(job.get("config", {}).get("enrich_processual"))
+    publico_enabled = bool(job.get("config", {}).get("enrich_publico"))
+    processual_not_found = {
+        str(item.get("numero_processo", ""))
+        for item in job.get("processual_not_found_rows", [])
+    }
+    publico_not_found = {
+        str(item.get("numero_processo", ""))
+        for item in job.get("official_not_found_rows", [])
+    }
+
+    q_lower = q.strip().lower()
+    rows = job.get("rows", [])
+    filtered: list[dict[str, Any]] = []
+
+    for row in rows:
+        summary = _pipeline_row_summary(
+            row,
+            processual_enabled=processual_enabled,
+            publico_enabled=publico_enabled,
+            processual_not_found=processual_not_found,
+            publico_not_found=publico_not_found,
+        )
+
+        if source == "processual" and summary["processual_status"] != "found":
+            continue
+        if source == "publico" and summary["publico_status"] != "found":
+            continue
+        if source == "both" and (
+            summary["processual_status"] != "found" or summary["publico_status"] != "found"
+        ):
+            continue
+        if documents_only and not (
+            summary["processual_qtd_documentos"] or summary["publico_qtd_documentos"]
+        ):
+            continue
+        if q_lower and q_lower not in _pipeline_search_blob(row):
+            continue
+
+        filtered.append(summary)
+
+    total = len(filtered)
+    page_rows = filtered[offset : offset + limit]
+
+    return {
+        "success": True,
+        "data": {
+            "job_status": job.get("status"),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "rows": page_rows,
+            "counts": {
+                "all": len(rows),
+                "processual_found": sum(1 for r in filtered if r["processual_status"] == "found"),
+                "publico_found": sum(1 for r in filtered if r["publico_status"] == "found"),
+                "with_documents": sum(
+                    1
+                    for r in filtered
+                    if r["processual_qtd_documentos"] or r["publico_qtd_documentos"]
+                ),
+            },
+        },
+    }
+
+
+@app.get("/api/pipeline/result/{job_id}/{numero_processo:path}")
+def pipeline_result_detail(job_id: str, numero_processo: str):
+    """Return the full enriched payload for a single pipeline row."""
+    job = jobs.get(job_id)
+    if not job:
+        return {"success": False, "error": "Job not found"}
+
+    normalized = re.sub(r"\D", "", numero_processo or "")
+    processual_enabled = bool(job.get("config", {}).get("enrich_processual"))
+    publico_enabled = bool(job.get("config", {}).get("enrich_publico"))
+    processual_not_found = {
+        str(item.get("numero_processo", ""))
+        for item in job.get("processual_not_found_rows", [])
+    }
+    publico_not_found = {
+        str(item.get("numero_processo", ""))
+        for item in job.get("official_not_found_rows", [])
+    }
+
+    for row in job.get("rows", []):
+        row_number = str(row.get("numero_processo", ""))
+        if row_number == numero_processo or re.sub(r"\D", "", row_number) == normalized:
+            return {
+                "success": True,
+                "data": _pipeline_row_detail(
+                    row,
+                    processual_enabled=processual_enabled,
+                    publico_enabled=publico_enabled,
+                    processual_not_found=processual_not_found,
+                    publico_not_found=publico_not_found,
+                ),
+            }
+
+    return {"success": False, "error": "Processo não encontrado neste job"}
 
 
 @app.post("/api/pipeline/control/{job_id}")
@@ -1373,6 +1911,14 @@ def pipeline_export(job_id: str):
     official_event_rows = job.get("official_event_rows", [])
     official_document_rows = job.get("official_document_rows", [])
     official_not_found_rows = job.get("official_not_found_rows", [])
+    processual_process_rows = job.get("processual_process_rows", [])
+    processual_party_rows = job.get("processual_party_rows", [])
+    processual_event_rows = job.get("processual_event_rows", [])
+    processual_distribution_rows = job.get("processual_distribution_rows", [])
+    processual_petition_rows = job.get("processual_petition_rows", [])
+    processual_document_rows = job.get("processual_document_rows", [])
+    processual_incident_rows = job.get("processual_incident_rows", [])
+    processual_not_found_rows = job.get("processual_not_found_rows", [])
 
     # Build official process map for merging
     official_proc_map: dict = {}
@@ -1398,13 +1944,20 @@ def pipeline_export(job_id: str):
         movement_rows=movement_rows_data,
         movement_complement_rows=movement_complement_rows_data,
         subject_rows=subject_rows_data,
+        processual_process_rows=processual_process_rows,
+        processual_party_rows=processual_party_rows,
+        processual_event_rows=processual_event_rows,
+        processual_distribution_rows=processual_distribution_rows,
+        processual_petition_rows=processual_petition_rows,
+        processual_document_rows=processual_document_rows,
+        processual_incident_rows=processual_incident_rows,
         official_process_rows=official_process_rows,
         official_party_rows=official_party_rows,
         official_lawyer_rows=official_lawyer_rows,
         official_event_rows=official_event_rows,
         official_document_rows=official_document_rows,
         raw_process_rows=raw_process_rows_data,
-        not_found_rows=official_not_found_rows,
+        not_found_rows=processual_not_found_rows + official_not_found_rows,
     )
 
     return StreamingResponse(

@@ -1,84 +1,154 @@
-"""
-Adapter que expõe uma interface orientada a objetos (TRF1Client) por cima das
-funções do módulo datajud_app (official_sources + trf1_public).
-
-Uso:
-    client = TRF1Client(secao="TRF1", timeout=30)
-    proc   = client.buscar_por_numero("0000001-23.2020.4.01.3400")
-    lista  = client.buscar_por_nome("João Silva", False)
-"""
-
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass, field, asdict
+import sys
+from dataclasses import asdict, dataclass, field
 from typing import Any
+from urllib.parse import parse_qs, urljoin, urlparse
 
-from datajud_app.official_sources import (
-    format_cnj_number,
-    _process_single_trf1_row,
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+
+TRF1_PROCESSUAL_BASE = "https://processual.trf1.jus.br/consultaProcessual"
+
+SEARCH_PATHS = {
+    "numero": "numeroProcesso.php",
+    "nomeParte": "nomeParte.php",
+    "cpfCnpj": "cpfCnpjParte.php",
+    "nomeAdvogado": "nomeAdvogado.php",
+    "oab": "oabAdvogado.php",
+}
+
+PROCESS_LINK_RE = re.compile(r"/consultaProcessual/processo\.php(?:\?|$)")
+LISTAR_PROCESSOS_RE = re.compile(
+    r"/consultaProcessual/(?:parte|advogado)/listarProcessos\.php(?:\?|$)"
 )
-from datajud_app.trf1_public import (
-    TRF1PublicSearchParams,
-    search_trf1_public_bundle,
+CNJ_NUMBER_RE = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
+SECURITY_BLOCK_RE = re.compile(
+    r"performing security verification|just a moment|enable javascript and cookies to continue",
+    re.IGNORECASE,
 )
+TOO_BROAD_RE = re.compile(r"mais de 500 .*? encontrad", re.IGNORECASE)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
-_DIGITS_RE = re.compile(r"\D")
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _has_display() -> bool:
+    return bool(os.environ.get("DISPLAY") or sys.platform == "darwin")
+
+
+def _launch_browser(playwright: Any) -> Any:
+    headless = _bool_env("TRF1_PROCESSUAL_HEADLESS", default=not _has_display())
+    kwargs: dict[str, Any] = {"headless": headless}
+    proxy_url = os.environ.get("TRF1_PROXY_URL", "").strip()
+    if proxy_url:
+        kwargs["proxy"] = {"server": proxy_url}
+    return playwright.chromium.launch(**kwargs)
+
+
+def _clean_text(value: Any) -> str:
+    text = str(value or "")
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _extract_lines(value: str) -> list[str]:
+    lines = []
+    for raw in str(value or "").replace("\xa0", " ").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _label_map_from_lines(value: str, labels: dict[str, str]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    lines = _extract_lines(value)
+    for index, line in enumerate(lines):
+        normalized = _clean_text(line.rstrip(":")).lower()
+        key = labels.get(normalized)
+        if key and index + 1 < len(lines):
+            found[key] = _clean_text(lines[index + 1])
+    return found
 
 
 def formatar_numero_processo(numero: str) -> str:
-    """Normaliza e formata um número de processo no padrão CNJ."""
-    digits = _DIGITS_RE.sub("", numero)
-    return format_cnj_number(digits)
+    digits = re.sub(r"\D", "", str(numero or ""))
+    if len(digits) == 20:
+        return (
+            f"{digits[:7]}-{digits[7:9]}.{digits[9:13]}."
+            f"{digits[13:14]}.{digits[14:16]}.{digits[16:20]}"
+        )
+    return str(numero or "").strip()
 
 
-# ---------------------------------------------------------------------------
-# Result dataclasses
-# ---------------------------------------------------------------------------
+@dataclass
+class Parte:
+    tipo: str = ""
+    nome: str = ""
+    entidade: str = ""
+    oab: str = ""
+    caracteristica: str = ""
 
 
 @dataclass
 class Movimentacao:
     data: str = ""
+    codigo: str = ""
     descricao: str = ""
+    complemento: str = ""
+
+
+@dataclass
+class Distribuicao:
+    data: str = ""
+    descricao: str = ""
+    juiz: str = ""
+
+
+@dataclass
+class Peticao:
+    numero: str = ""
+    data_entrada: str = ""
+    data_juntada: str = ""
     tipo: str = ""
+    complemento: str = ""
 
 
 @dataclass
-class Advogado:
-    nome: str = ""
-    oab: str = ""
-    polo: str = ""
-
-
-@dataclass
-class Parte:
-    nome: str = ""
-    polo: str = ""
-    documentos: list[str] = field(default_factory=list)
-    advogados: list[str] = field(default_factory=list)
+class Documento:
+    descricao: str = ""
+    data: str = ""
+    url: str = ""
 
 
 @dataclass
 class ProcessoTRF1:
-    numero_processo: str = ""
-    classe: str = ""
+    numero: str = ""
+    nova_numeracao: str = ""
+    grupo: str = ""
+    assunto: str = ""
+    data_autuacao: str = ""
     orgao_julgador: str = ""
-    valor_causa: str = ""
+    juiz_relator: str = ""
+    processo_originario: str = ""
     situacao: str = ""
-    partes: list[dict[str, Any]] = field(default_factory=list)
-    movimentacoes: list[dict[str, Any]] = field(default_factory=list)
-    # campos extras
-    polo_ativo: str = ""
-    polo_passivo: str = ""
-    assuntos: str = ""
-    data_distribuicao: str = ""
-    cessao_credito: bool = False
-    raw: dict[str, Any] = field(default_factory=dict)
+    url_consulta: str = ""
+    url_inteiro_teor: str = ""
+    secao: str = "TRF1"
+    partes: list[Parte] = field(default_factory=list)
+    distribuicoes: list[Distribuicao] = field(default_factory=list)
+    movimentacoes: list[Movimentacao] = field(default_factory=list)
+    peticoes: list[Peticao] = field(default_factory=list)
+    documentos: list[Documento] = field(default_factory=list)
+    incidentes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,193 +156,401 @@ class ProcessoTRF1:
 
 @dataclass
 class ResultadoBusca:
-    numero_processo: str = ""
-    classe: str = ""
-    orgao_julgador: str = ""
-    polo_ativo: str = ""
-    polo_passivo: str = ""
-    ultima_movimentacao: str = ""
-    data_ultima_movimentacao: str = ""
-    situacao: str = ""
+    numero: str = ""
+    nome_parte: str = ""
+    secao: str = "TRF1"
+    url: str = ""
+    processo_originario: str = ""
 
 
-# ---------------------------------------------------------------------------
-# TRF1Client
-# ---------------------------------------------------------------------------
+class TRF1SearchTooBroadError(RuntimeError):
+    pass
 
 
-def _build_partes_from_rows(
-    party_rows: list[dict[str, Any]],
-    lawyer_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Consolida party_rows e lawyer_rows numa lista de partes estruturadas."""
-    partes_map: dict[str, dict[str, Any]] = {}
-
-    for row in party_rows:
-        nome = row.get("nome", "")
-        polo = row.get("polo", "")
-        key = f"{polo}::{nome}"
-        if key not in partes_map:
-            partes_map[key] = {
-                "nome": nome,
-                "polo": polo,
-                "documentos": [],
-                "advogados": [],
-            }
-        cpf = row.get("cpf", "")
-        cnpj = row.get("cnpj", "")
-        if cpf:
-            partes_map[key]["documentos"].append(f"CPF: {cpf}")
-        if cnpj:
-            partes_map[key]["documentos"].append(f"CNPJ: {cnpj}")
-
-    for row in lawyer_rows:
-        nome_adv = row.get("nome_advogado", "") or row.get("nome", "")
-        oab = row.get("oab_formatada", "") or row.get("oab", "")
-        polo = row.get("polo", "")
-        adv_str = f"{nome_adv} ({oab})" if oab else nome_adv
-        # attach to matching party pole
-        for parte in partes_map.values():
-            if parte["polo"] == polo or not polo:
-                parte["advogados"].append(adv_str)
-                break
-
-    return list(partes_map.values())
+def _wait_until_unblocked(page: Any, timeout_ms: int = 15000) -> None:
+    deadline = timeout_ms
+    waited = 0
+    while waited <= deadline:
+        try:
+            text = page.inner_text("body")
+        except Exception:
+            text = ""
+        if not SECURITY_BLOCK_RE.search(text):
+            return
+        page.wait_for_timeout(1000)
+        waited += 1000
+    raise RuntimeError(
+        "O portal processual do TRF1 bloqueou a automacao. Em ambientes Linux, "
+        "execute o navegador com interface grafica ou via Xvfb."
+    )
 
 
-def _build_movimentacoes_from_rows(event_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    movs = []
-    for row in event_rows:
-        movs.append(
+def _wait_recaptcha_token(page: Any) -> None:
+    try:
+        page.wait_for_function(
+            "() => { const el = document.querySelector('#recaptchaResponse'); return !el || !!el.value; }",
+            timeout=10000,
+        )
+    except Exception:
+        page.wait_for_timeout(2000)
+
+
+def _open_search_page(page: Any, search_type: str, secao: str) -> None:
+    url = f"{TRF1_PROCESSUAL_BASE}/{SEARCH_PATHS[search_type]}?secao={secao}"
+    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    _wait_until_unblocked(page)
+    _wait_recaptcha_token(page)
+
+
+def _toggle_baixados(page: Any, checked: bool) -> None:
+    locator = page.locator("input[name='mostrarBaixados']")
+    if locator.count() > 0:
+        locator.first.set_checked(checked)
+
+
+def _extract_status_text(body_text: str) -> str:
+    for line in _extract_lines(body_text):
+        if re.fullmatch(r"[A-ZÇÁÉÍÓÚÃÕ /-]{5,}", line) and " / " in line:
+            return line
+    return ""
+
+
+def _extract_process_number(link_text: str, href: str) -> str:
+    match = CNJ_NUMBER_RE.search(link_text or "")
+    if match:
+        return match.group(0)
+    query = parse_qs(urlparse(href).query)
+    proc = _clean_text(query.get("proc", [""])[0])
+    return formatar_numero_processo(proc) if proc else _clean_text(link_text)
+
+
+def _parse_process_results(html: str, *, secao: str, default_name: str = "") -> list[ResultadoBusca]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[ResultadoBusca] = []
+    seen: set[tuple[str, str]] = set()
+
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if not PROCESS_LINK_RE.search(href):
+            continue
+        absolute_url = urljoin(f"{TRF1_PROCESSUAL_BASE}/", href)
+        numero = _extract_process_number(_clean_text(link.get_text(" ", strip=True)), absolute_url)
+        if not numero:
+            continue
+
+        query = parse_qs(urlparse(absolute_url).query)
+        name = default_name or _clean_text(query.get("nome", [""])[0])
+        processo_originario = ""
+
+        row = link.find_parent("tr")
+        if row:
+            cells = row.find_all("td")
+            if len(cells) >= 2:
+                processo_originario = _clean_text(cells[1].get_text(" ", strip=True))
+
+        key = (numero, absolute_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(
+            ResultadoBusca(
+                numero=numero,
+                nome_parte=name,
+                secao=secao,
+                url=absolute_url,
+                processo_originario=processo_originario,
+            )
+        )
+
+    return results
+
+
+def _parse_listar_processos_links(html: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if not LISTAR_PROCESSOS_RE.search(href):
+            continue
+        absolute_url = urljoin(f"{TRF1_PROCESSUAL_BASE}/", href)
+        if absolute_url in seen:
+            continue
+        seen.add(absolute_url)
+        links.append(
             {
-                "data": row.get("data_hora", ""),
-                "descricao": row.get("evento", ""),
-                "tipo": row.get("tipo_evento", ""),
+                "nome": _clean_text(link.get_text(" ", strip=True)),
+                "url": absolute_url,
             }
         )
-    return movs
+
+    return links
+
+
+def _table_rows(tab: Any, expected_cols: int) -> list[list[str]]:
+    if tab is None:
+        return []
+    rows: list[list[str]] = []
+    for row in tab.find_all("tr"):
+        cells = [_clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all("td")]
+        if len(cells) >= expected_cols:
+            rows.append(cells[:expected_cols])
+    return rows
+
+
+def _parse_process_page(page: Any, *, secao: str, source_url: str) -> ProcessoTRF1 | None:
+    body_text = page.inner_text("body")
+    try:
+        for tab_label in ("Distribuição", "Partes", "Movimentação", "Incidentes", "Petições", "Documentos", "Inteiro Teor"):
+            link = page.get_by_role("link", name=tab_label)
+            if link.count() > 0:
+                link.first.click(timeout=3000)
+                page.wait_for_timeout(800)
+    except Exception:
+        pass
+
+    html = page.content()
+    soup = BeautifulSoup(html, "html.parser")
+    process_tab = soup.select_one("#aba-processo")
+    if process_tab is None:
+        lines = _extract_lines(body_text)
+        message = next(
+            (
+                line
+                for line in lines
+                if "precatório" in line.lower() or "rpv" in line.lower() or "não encontrado" in line.lower()
+            ),
+            "",
+        )
+        fallback_number = next((line for line in lines if CNJ_NUMBER_RE.search(line)), "")
+        if message or fallback_number:
+            return ProcessoTRF1(
+                numero="",
+                nova_numeracao=CNJ_NUMBER_RE.search(fallback_number).group(0) if CNJ_NUMBER_RE.search(fallback_number) else fallback_number,
+                assunto=message,
+                situacao=_extract_status_text(body_text),
+                url_consulta=source_url,
+                secao=secao,
+            )
+        return None
+
+    data = _label_map_from_lines(
+        process_tab.get_text("\n", strip=True),
+        {
+            "processo": "numero",
+            "nova numeração": "nova_numeracao",
+            "grupo": "grupo",
+            "assunto": "assunto",
+            "data de autuação": "data_autuacao",
+            "órgão julgador": "orgao_julgador",
+            "juiz relator": "juiz_relator",
+            "processo originário": "processo_originario",
+        },
+    )
+
+    inteiro_teor_link = soup.select_one("#aba-inteiroteor a[href]")
+
+    partes_tab = soup.select_one("#aba-partes")
+    partes = [
+        Parte(
+            tipo=row[0],
+            entidade=row[1],
+            oab=row[2],
+            nome=row[3],
+            caracteristica=row[4],
+        )
+        for row in _table_rows(partes_tab, 5)
+    ]
+
+    distribuicao_tab = soup.select_one("#aba-distribuicao")
+    distribuicoes = [
+        Distribuicao(data=row[0], descricao=row[1], juiz=row[2])
+        for row in _table_rows(distribuicao_tab, 3)
+    ]
+
+    movimentacao_tab = soup.select_one("#aba-movimentacao")
+    movimentacoes = [
+        Movimentacao(data=row[0], codigo=row[1], descricao=row[2], complemento=row[3])
+        for row in _table_rows(movimentacao_tab, 4)
+    ]
+
+    peticoes_tab = soup.select_one("#aba-peticoes")
+    peticoes = [
+        Peticao(
+            numero=row[0],
+            data_entrada=row[1],
+            data_juntada=row[2],
+            tipo=row[3],
+            complemento=row[4],
+        )
+        for row in _table_rows(peticoes_tab, 5)
+    ]
+
+    documentos: list[Documento] = []
+    documentos_tab = soup.select_one("#aba-documentos")
+    if documentos_tab is not None and "não há documentos digitais" not in documentos_tab.get_text(" ", strip=True).lower():
+        table = documentos_tab.find("table")
+        if table:
+            for row in table.find_all("tr"):
+                cells = [_clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all("td")]
+                if not cells:
+                    continue
+                link = row.find("a", href=True)
+                date = ""
+                description = ""
+                for cell in cells:
+                    if re.search(r"\d{2}/\d{2}/\d{4}", cell) and not date:
+                        date = cell
+                    elif cell:
+                        description = description or cell
+                if description:
+                    documentos.append(
+                        Documento(
+                            descricao=description,
+                            data=date,
+                            url=urljoin(f"{TRF1_PROCESSUAL_BASE}/", link["href"]) if link else "",
+                        )
+                    )
+
+    incidentes: list[str] = []
+    incidentes_tab = soup.select_one("#aba-incidentes")
+    if incidentes_tab is not None:
+        text = _clean_text(incidentes_tab.get_text("\n", strip=True))
+        if text and "nenhum registro encontrado" not in text.lower():
+            lines = _extract_lines(text)
+            incidentes = [line for line in lines if line.lower() != "incidentes"]
+
+    return ProcessoTRF1(
+        numero=data.get("numero", ""),
+        nova_numeracao=data.get("nova_numeracao", ""),
+        grupo=data.get("grupo", ""),
+        assunto=data.get("assunto", ""),
+        data_autuacao=data.get("data_autuacao", ""),
+        orgao_julgador=data.get("orgao_julgador", ""),
+        juiz_relator=data.get("juiz_relator", ""),
+        processo_originario=data.get("processo_originario", ""),
+        situacao=_extract_status_text(body_text),
+        url_consulta=source_url,
+        url_inteiro_teor=inteiro_teor_link["href"] if inteiro_teor_link else "",
+        secao=secao,
+        partes=partes,
+        distribuicoes=distribuicoes,
+        movimentacoes=movimentacoes,
+        peticoes=peticoes,
+        documentos=documentos,
+        incidentes=incidentes,
+    )
 
 
 class TRF1Client:
-    """
-    Cliente para o TRF1 (portal consulta pública).
-
-    Args:
-        secao:   Seção judiciária (ignorado na prática — o portal é único).
-        timeout: Timeout em segundos (usado como referência, Playwright gerencia).
-    """
-
     def __init__(self, secao: str = "TRF1", timeout: int = 30) -> None:
         self.secao = secao
         self.timeout = timeout
 
-    # ------------------------------------------------------------------
-    # Busca por número (retorna ProcessoTRF1 ou None)
-    # ------------------------------------------------------------------
+    def _search_results_from_form(self, search_type: str, value: str, baixados: bool = False) -> list[ResultadoBusca]:
+        with sync_playwright() as playwright:
+            browser = _launch_browser(playwright)
+            context = browser.new_context(locale="pt-BR")
+            page = context.new_page()
+            try:
+                _open_search_page(page, search_type, self.secao)
+
+                selector_map = {
+                    "nomeParte": "input[name='nome']",
+                    "cpfCnpj": "input[name='cpf_cnpj']",
+                    "nomeAdvogado": "input[name='nome']",
+                    "oab": "input[name='oab']",
+                }
+                normalized_value = value.strip()
+                if search_type == "cpfCnpj":
+                    normalized_value = re.sub(r"\D", "", normalized_value)
+
+                page.locator(selector_map[search_type]).fill(normalized_value)
+                _toggle_baixados(page, baixados)
+                page.get_by_role("button", name="Pesquisar").click()
+                page.wait_for_load_state("domcontentloaded", timeout=45000)
+                page.wait_for_timeout(1500)
+                _wait_until_unblocked(page)
+
+                html = page.content()
+                body_text = page.inner_text("body")
+                if TOO_BROAD_RE.search(body_text):
+                    raise TRF1SearchTooBroadError(_clean_text(TOO_BROAD_RE.search(body_text).group(0)))
+
+                results = _parse_process_results(html, secao=self.secao, default_name=value.strip())
+                if results:
+                    return results
+
+                listar_links = _parse_listar_processos_links(html)
+                aggregated: list[ResultadoBusca] = []
+                seen: set[tuple[str, str]] = set()
+
+                for item in listar_links[:30]:
+                    list_page = context.new_page()
+                    try:
+                        list_page.goto(item["url"], wait_until="domcontentloaded", timeout=45000)
+                        list_page.wait_for_timeout(1000)
+                        sub_results = _parse_process_results(
+                            list_page.content(),
+                            secao=self.secao,
+                            default_name=item["nome"],
+                        )
+                        for result in sub_results:
+                            key = (result.numero, result.url)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            aggregated.append(result)
+                            if len(aggregated) >= 50:
+                                return aggregated
+                    finally:
+                        list_page.close()
+
+                return aggregated
+            finally:
+                context.close()
+                browser.close()
+
+    def buscar_por_url(self, url: str) -> ProcessoTRF1 | None:
+        with sync_playwright() as playwright:
+            browser = _launch_browser(playwright)
+            context = browser.new_context(locale="pt-BR")
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(1500)
+                _wait_until_unblocked(page)
+                return _parse_process_page(page, secao=self.secao, source_url=url)
+            finally:
+                context.close()
+                browser.close()
 
     def buscar_por_numero(self, numero: str) -> ProcessoTRF1 | None:
-        row = {
-            "tribunal_alias": "api_publica_trf1",
-            "numero_processo": formatar_numero_processo(numero),
-            "linha_origem": None,
-        }
-        result = _process_single_trf1_row(row, "TRF1 consulta publica")
-
-        if result["status"] != "success":
-            return None
-
-        proc_row: dict[str, Any] = result["process_row"]
-        partes = _build_partes_from_rows(
-            result.get("party_rows", []),
-            result.get("lawyer_rows", []),
-        )
-        movimentacoes = _build_movimentacoes_from_rows(result.get("event_rows", []))
-
-        return ProcessoTRF1(
-            numero_processo=proc_row.get("numero_processo", ""),
-            classe=proc_row.get("classe", ""),
-            orgao_julgador=proc_row.get("orgao_julgador", ""),
-            valor_causa=proc_row.get("valor_causa", ""),
-            situacao=proc_row.get("ultimo_evento", ""),
-            partes=partes,
-            movimentacoes=movimentacoes,
-            polo_ativo=proc_row.get("polo_ativo", ""),
-            polo_passivo=proc_row.get("polo_passivo", ""),
-            assuntos=proc_row.get("assuntos", ""),
-            data_distribuicao=proc_row.get("data_distribuicao", ""),
-            cessao_credito=bool(proc_row.get("cessao_credito")),
-            raw=proc_row,
-        )
-
-    # ------------------------------------------------------------------
-    # Buscas por lista — retornam list[ResultadoBusca]
-    # ------------------------------------------------------------------
-
-    def _buscar_bundle(self, params: TRF1PublicSearchParams) -> list[ResultadoBusca]:
-        bundle = search_trf1_public_bundle(params, max_details=50)
-        resultados: list[ResultadoBusca] = []
-
-        for proc_row in bundle.process_rows:
-            resultados.append(
-                ResultadoBusca(
-                    numero_processo=proc_row.get("numero_processo", ""),
-                    classe=proc_row.get("classe", "") or proc_row.get("classe_resultado", ""),
-                    orgao_julgador=proc_row.get("orgao_julgador", ""),
-                    polo_ativo=proc_row.get("polo_ativo", "") or proc_row.get("polo_ativo_resumo_resultado", ""),
-                    polo_passivo=proc_row.get("polo_passivo", "") or proc_row.get("polo_passivo_resumo_resultado", ""),
-                    ultima_movimentacao=proc_row.get("ultimo_evento", "") or proc_row.get("ultima_movimentacao_resultado", ""),
-                    data_ultima_movimentacao=proc_row.get("data_ultimo_evento", "") or proc_row.get("data_ultima_movimentacao_resultado", ""),
-                    situacao=proc_row.get("ultimo_evento", ""),
-                )
-            )
-
-        # Fallback: se não encontrou detalhes mas tem search_rows
-        if not resultados and bundle.search_rows:
-            for row in bundle.search_rows:
-                resultados.append(
-                    ResultadoBusca(
-                        numero_processo=row.get("numero_processo", ""),
-                        classe=row.get("classe_resultado", ""),
-                        orgao_julgador="",
-                        polo_ativo=row.get("polo_ativo_resumo", ""),
-                        polo_passivo=row.get("polo_passivo_resumo", ""),
-                        ultima_movimentacao=row.get("ultima_movimentacao", ""),
-                        data_ultima_movimentacao=row.get("data_ultima_movimentacao", ""),
-                        situacao="",
-                    )
-                )
-
-        return resultados
+        with sync_playwright() as playwright:
+            browser = _launch_browser(playwright)
+            context = browser.new_context(locale="pt-BR")
+            page = context.new_page()
+            try:
+                _open_search_page(page, "numero", self.secao)
+                page.locator("input[name='proc']").fill(numero.strip())
+                page.get_by_role("button", name="Pesquisar").click()
+                page.wait_for_load_state("domcontentloaded", timeout=45000)
+                page.wait_for_timeout(1500)
+                _wait_until_unblocked(page)
+                return _parse_process_page(page, secao=self.secao, source_url=page.url)
+            finally:
+                context.close()
+                browser.close()
 
     def buscar_por_nome(self, valor: str, baixados: bool = False) -> list[ResultadoBusca]:
-        params = TRF1PublicSearchParams(party_name=valor)
-        return self._buscar_bundle(params)
+        return self._search_results_from_form("nomeParte", valor, baixados)
 
     def buscar_por_cpf_cnpj(self, valor: str, baixados: bool = False) -> list[ResultadoBusca]:
-        digits = _DIGITS_RE.sub("", valor)
-        if len(digits) <= 11:
-            params = TRF1PublicSearchParams(document_kind="cpf", document_number=valor)
-        else:
-            params = TRF1PublicSearchParams(document_kind="cnpj", document_number=valor)
-        return self._buscar_bundle(params)
+        return self._search_results_from_form("cpfCnpj", valor, baixados)
 
     def buscar_por_advogado(self, valor: str, baixados: bool = False) -> list[ResultadoBusca]:
-        params = TRF1PublicSearchParams(lawyer_name=valor)
-        return self._buscar_bundle(params)
+        return self._search_results_from_form("nomeAdvogado", valor, baixados)
 
     def buscar_por_oab(self, valor: str, baixados: bool = False) -> list[ResultadoBusca]:
-        # Parse "OAB/DF 12345" or "12345/DF" or just "12345"
-        oab_num = valor.strip()
-        oab_state = ""
-        oab_suffix = ""
-        state_match = re.search(r"([A-Z]{2})", oab_num)
-        if state_match:
-            oab_state = state_match.group(1)
-            oab_num = re.sub(r"[A-Z]{2}", "", oab_num)
-        oab_num = re.sub(r"[^\d]", "", oab_num)
-        params = TRF1PublicSearchParams(
-            oab_number=oab_num,
-            oab_state=oab_state,
-            oab_suffix=oab_suffix,
-        )
-        return self._buscar_bundle(params)
+        return self._search_results_from_form("oab", valor, baixados)
