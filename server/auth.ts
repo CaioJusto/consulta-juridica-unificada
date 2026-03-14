@@ -36,6 +36,7 @@ export function registerAuth(app: Express) {
     session({
       name: "consulta.sid",
       secret: SESSION_SECRET,
+      proxy: true,
       resave: false,
       saveUninitialized: false,
       store: new MemoryStore({
@@ -44,7 +45,7 @@ export function registerAuth(app: Express) {
       cookie: {
         httpOnly: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: "auto",
         maxAge: 7 * 24 * 60 * 60 * 1000,
       },
     }),
