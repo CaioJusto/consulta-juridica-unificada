@@ -686,6 +686,7 @@ export function PipelineTab() {
   const [recentJobs, setRecentJobs] = useState<PipelineJobSummary[]>([]);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const syncedJobConfigRef = useRef<string | null>(null);
 
   const loadRecentJobs = useCallback(async () => {
     try {
@@ -693,27 +694,40 @@ export function PipelineTab() {
       const payload = await response.json();
       if (payload.success) {
         setRecentJobs(payload.data || []);
-        if (!jobId) {
-          const activeJob = (payload.data || []).find((item: PipelineJobSummary) =>
-            ["running", "paused"].includes(item.status),
-          );
-          if (activeJob) {
-            localStorage.setItem("activeJobId", activeJob.id);
-            setJobId(activeJob.id);
-          }
-        }
       }
     } catch {
       // ignore recent-jobs load failures
     }
-  }, [jobId]);
+  }, []);
 
-  // On mount: resume polling if there's an active job in localStorage
+  // On mount: resume only a still-active job from localStorage.
   useEffect(() => {
     const savedJobId = localStorage.getItem("activeJobId");
-    if (savedJobId) {
-      setJobId(savedJobId);
-    }
+    if (!savedJobId) return;
+
+    let cancelled = false;
+    fetch(`${API_BASE}/api/pipeline/status/${savedJobId}`)
+      .then((r) => r.json())
+      .then((payload) => {
+        if (cancelled) return;
+        if (!payload?.success) {
+          localStorage.removeItem("activeJobId");
+          return;
+        }
+        const status = String(payload?.data?.status || "");
+        if (status === "running" || status === "paused") {
+          setJobId(savedJobId);
+        } else {
+          localStorage.removeItem("activeJobId");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) localStorage.removeItem("activeJobId");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Poll server for job status
@@ -734,12 +748,13 @@ export function PipelineTab() {
         }
         const data = j.data;
         const progress = data.progress;
-        if (data.config) {
+        if (data.config && syncedJobConfigRef.current !== jobId) {
           setConfig((prev) => ({
             ...prev,
             enrichProcessual: Boolean(data.config.enrich_processual ?? prev.enrichProcessual),
             enrichPublico: Boolean(data.config.enrich_publico ?? prev.enrichPublico),
           }));
+          syncedJobConfigRef.current = jobId;
         }
 
         // Map server status to phase
@@ -819,6 +834,7 @@ export function PipelineTab() {
           if (pollRef.current) clearInterval(pollRef.current);
           if (data.status === "done" || data.status === "stopped") {
             localStorage.removeItem("activeJobId");
+            syncedJobConfigRef.current = null;
           }
           void loadRecentJobs();
         }
@@ -1094,6 +1110,7 @@ export function PipelineTab() {
       }
       const newJobId: string = json.job_id;
       localStorage.setItem("activeJobId", newJobId);
+      syncedJobConfigRef.current = newJobId;
       setJobId(newJobId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erro de conexão.";
@@ -1124,6 +1141,7 @@ export function PipelineTab() {
   function resetPipeline() {
     if (pollRef.current) clearInterval(pollRef.current);
     localStorage.removeItem("activeJobId");
+    syncedJobConfigRef.current = null;
     setJobId(null);
     setRows([]);
     setPhase("idle");
@@ -1334,6 +1352,7 @@ export function PipelineTab() {
                     className="h-8 text-xs"
                     onClick={() => {
                       localStorage.setItem("activeJobId", job.id);
+                      syncedJobConfigRef.current = null;
                       setJobId(job.id);
                       setSelectedRow(null);
                       setError("");
