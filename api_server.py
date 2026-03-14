@@ -1293,6 +1293,17 @@ def _pipeline_row_summary(
         "valor_causa": row.get("valor_causa", ""),
         "situacao_pje": row.get("situacao_pje", ""),
         "orgao_julgador_pje": row.get("orgao_julgador_pje", ""),
+        "tipo_credito": row.get("tipo_credito", ""),
+        "status_recebimento": row.get("status_recebimento", ""),
+        "motivo_recebimento": row.get("motivo_recebimento", ""),
+        "status_oportunidade": row.get("status_oportunidade", ""),
+        "motivos_status": row.get("motivos_status", ""),
+        "cessao_credito": row.get("cessao_credito", ""),
+        "cessao_detalhes": row.get("cessao_detalhes", ""),
+        "partes_cedentes": row.get("partes_cedentes", ""),
+        "partes_nao_cedentes": row.get("partes_nao_cedentes", ""),
+        "movimentos_codigos_detectados": row.get("movimentos_codigos_detectados", ""),
+        "assuntos_codigos_detectados": row.get("assuntos_codigos_detectados", ""),
         "processual_status": processual_status,
         "publico_status": publico_status,
         "processual_qtd_partes": len(processual_data.get("partes", []) or []),
@@ -1348,6 +1359,8 @@ def _pipeline_search_blob(row: dict[str, Any]) -> str:
                 [
                     str(d.get("documento", "")),
                     str(d.get("certidao", "")),
+                    str(d.get("texto_documento", ""))[:4000],
+                    str(d.get("texto_certidao", ""))[:4000],
                 ],
             )
         )
@@ -1364,6 +1377,14 @@ def _pipeline_search_blob(row: dict[str, Any]) -> str:
         row.get("advogados", ""),
         row.get("situacao_processual", ""),
         row.get("valor_causa", ""),
+        row.get("tipo_credito", ""),
+        row.get("status_recebimento", ""),
+        row.get("status_oportunidade", ""),
+        row.get("motivos_status", ""),
+        row.get("cessao_credito", ""),
+        row.get("cessao_detalhes", ""),
+        row.get("partes_cedentes", ""),
+        row.get("partes_nao_cedentes", ""),
         row.get("situacao_pje", ""),
         row.get("orgao_julgador_pje", ""),
         processual_partes,
@@ -1371,6 +1392,177 @@ def _pipeline_search_blob(row: dict[str, Any]) -> str:
         publico_documentos,
     ]
     return " ".join(str(v) for v in values if v).lower()
+
+
+def _normalized_process_number(raw_value: Any) -> str:
+    return re.sub(r"\D", "", str(raw_value or ""))
+
+
+def _yn_to_bool(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"sim", "yes", "true", "1"}
+
+
+def _derive_receiving_status(analysis: dict[str, Any]) -> tuple[str, str]:
+    tipo_credito = str(analysis.get("tipo_credito") or "")
+    if tipo_credito == "Fora do foco":
+        return "fora_do_foco", "Sem indício suficiente de precatório ou RPV."
+
+    paid_signals = any(
+        _yn_to_bool(analysis.get(key))
+        for key in (
+            "indicio_pagamento_datajud",
+            "indicio_levantamento_datajud",
+            "oficial_indicio_pagamento",
+            "oficial_indicio_levantamento",
+        )
+    )
+    if paid_signals:
+        return "recebido_ou_em_levantamento", "Há indício de pagamento, levantamento ou alvará."
+
+    pending_signals = any(
+        _yn_to_bool(analysis.get(key))
+        for key in (
+            "indicio_expedicao_datajud",
+            "oficial_aguardando_pagamento",
+        )
+    )
+    if pending_signals:
+        return "pendente", "Há indício de requisição expedida ou aguardando pagamento."
+
+    return "revisar_manual", "Sem sinal suficiente para afirmar pagamento ou pendência."
+
+
+def _build_processual_analysis_rows(job: dict[str, Any]) -> list[dict[str, Any]]:
+    event_rows: list[dict[str, Any]] = []
+
+    for item in job.get("processual_event_rows", []) or []:
+        event_rows.append(
+            {
+                "numero_processo": item.get("numero_processo", ""),
+                "data_hora": item.get("data", ""),
+                "evento": item.get("descricao", ""),
+                "documento_resumo": item.get("complemento", ""),
+                "descricao": item.get("descricao", ""),
+            }
+        )
+
+    for item in job.get("processual_petition_rows", []) or []:
+        event_rows.append(
+            {
+                "numero_processo": item.get("numero_processo", ""),
+                "data_hora": item.get("data_juntada", "") or item.get("data_entrada", ""),
+                "evento": item.get("tipo", ""),
+                "documento_resumo": item.get("complemento", ""),
+                "descricao": " - ".join(
+                    part
+                    for part in [item.get("tipo", ""), item.get("complemento", "")]
+                    if part
+                ),
+            }
+        )
+
+    for item in job.get("processual_document_rows", []) or []:
+        event_rows.append(
+            {
+                "numero_processo": item.get("numero_processo", ""),
+                "data_hora": item.get("data", ""),
+                "evento": item.get("descricao", ""),
+                "documento_resumo": item.get("descricao", ""),
+                "descricao": item.get("descricao", ""),
+            }
+        )
+
+    return event_rows
+
+
+def _refresh_credit_analysis(job: dict[str, Any]) -> None:
+    raw_sources = job.get("raw_sources") or []
+    if not raw_sources:
+        job["credit_analysis_rows"] = []
+        return
+
+    from datajud_app.credit_analysis import build_credit_analysis_rows
+    from datajud_app.excel_utils import flatten_process, movements_rows, subjects_rows
+
+    process_rows = [flatten_process(source) for source in raw_sources]
+    movement_rows = movements_rows(raw_sources)
+    subject_rows = subjects_rows(raw_sources)
+    official_process_rows = job.get("official_process_rows", []) or []
+    official_event_rows = job.get("official_event_rows", []) or []
+    processual_event_rows = _build_processual_analysis_rows(job)
+    analysis_event_rows = [*official_event_rows, *processual_event_rows]
+
+    analysis_rows = build_credit_analysis_rows(
+        datajud_process_rows=process_rows,
+        datajud_movement_rows=movement_rows,
+        datajud_subject_rows=subject_rows,
+        official_process_rows=official_process_rows,
+        official_event_rows=analysis_event_rows,
+        official_consulta_rows=official_process_rows,
+    )
+    for analysis in analysis_rows:
+        status_recebimento, motivo_recebimento = _derive_receiving_status(analysis)
+        analysis["status_recebimento"] = status_recebimento
+        analysis["motivo_recebimento"] = motivo_recebimento
+    job["credit_analysis_rows"] = analysis_rows
+
+    analysis_by_number = {
+        _normalized_process_number(item.get("numero_processo")): item
+        for item in analysis_rows
+    }
+    official_by_number = {
+        _normalized_process_number(item.get("numero_processo")): item
+        for item in official_process_rows
+    }
+
+    for row in job.get("rows", []):
+        normalized = _normalized_process_number(row.get("numero_processo"))
+        analysis = analysis_by_number.get(normalized, {})
+        official = official_by_number.get(normalized, {})
+
+        row["tipo_credito"] = analysis.get("tipo_credito", "")
+        row["status_recebimento"] = analysis.get("status_recebimento", "")
+        row["motivo_recebimento"] = analysis.get("motivo_recebimento", "")
+        row["status_oportunidade"] = analysis.get("status_oportunidade", "")
+        row["motivos_status"] = analysis.get("motivos_status", "")
+        row["movimentos_codigos_detectados"] = analysis.get("movimentos_codigos_detectados", "")
+        row["assuntos_codigos_detectados"] = analysis.get("assuntos_codigos_detectados", "")
+        row["indicio_assunto_precatorio"] = analysis.get("indicio_assunto_precatorio", "")
+        row["indicio_assunto_rpv"] = analysis.get("indicio_assunto_rpv", "")
+        row["indicio_expedicao_datajud"] = analysis.get("indicio_expedicao_datajud", "")
+        row["indicio_pagamento_datajud"] = analysis.get("indicio_pagamento_datajud", "")
+        row["indicio_levantamento_datajud"] = analysis.get("indicio_levantamento_datajud", "")
+        row["indicio_cessao_datajud"] = analysis.get("indicio_cessao_datajud", "")
+        row["oficial_aguardando_pagamento"] = analysis.get("oficial_aguardando_pagamento", "")
+        row["oficial_indicio_pagamento"] = analysis.get("oficial_indicio_pagamento", "")
+        row["oficial_indicio_levantamento"] = analysis.get("oficial_indicio_levantamento", "")
+        row["oficial_indicio_cessao"] = analysis.get("oficial_indicio_cessao", "")
+
+        row["cessao_credito"] = official.get("cessao_credito", row.get("cessao_credito", ""))
+        row["cessao_detalhes"] = official.get("cessao_detalhes", row.get("cessao_detalhes", ""))
+        row["partes_cedentes"] = official.get("partes_cedentes", row.get("partes_cedentes", ""))
+        row["partes_nao_cedentes"] = official.get(
+            "partes_nao_cedentes", row.get("partes_nao_cedentes", "")
+        )
+
+        if row.get("status_oportunidade") != "descartar_pago_ou_em_levantamento":
+            official_cessao = str(row.get("cessao_credito") or "").strip()
+            if official_cessao in {"Sim", "Possível"}:
+                row["status_oportunidade"] = "descartar_com_indicio_de_cessao"
+                existing_reasons = [
+                    part.strip()
+                    for part in str(row.get("motivos_status") or "").split("|")
+                    if part.strip()
+                ]
+                reason = (
+                    "Fonte oficial confirmou cessão de crédito."
+                    if official_cessao == "Sim"
+                    else "Fonte oficial indica possível cessão de crédito."
+                )
+                if reason not in existing_reasons:
+                    existing_reasons.append(reason)
+                row["motivos_status"] = " | ".join(existing_reasons)
+                row["oficial_indicio_cessao"] = "Sim"
 
 
 def _run_pipeline(job_id: str) -> None:
@@ -1557,7 +1749,20 @@ def _run_pipeline(job_id: str) -> None:
                     "ultima_atualizacao": p.get("ultima_atualizacao", ""),
                     "assuntos": assuntos_str,
                     "qtd_movimentos": len(movimentos),
+                    "ultima_mov_data": ultima_mov.get("data_hora", ""),
+                    "ultima_mov_nome": ultima_mov.get("nome", ""),
+                    "primeira_movimentacao": f"{primeira_mov.get('data_hora', '')} {primeira_mov.get('nome', '')}".strip(),
                     "ultima_movimentacao": f"{ultima_mov.get('data_hora', '')} {ultima_mov.get('nome', '')}".strip(),
+                    "datajud_movimentos": movimentos,
+                    "tipo_credito": "",
+                    "status_recebimento": "",
+                    "motivo_recebimento": "",
+                    "status_oportunidade": "",
+                    "motivos_status": "",
+                    "cessao_credito": "",
+                    "cessao_detalhes": "",
+                    "partes_cedentes": "",
+                    "partes_nao_cedentes": "",
                     # TRF1 Processual fields (populated later)
                     "polo_ativo_nome": "",
                     "polo_ativo_cpf": "",
@@ -1592,6 +1797,9 @@ def _run_pipeline(job_id: str) -> None:
 
         if job["status"] == "stopped":
             return
+
+        _refresh_credit_analysis(job)
+        _persist_job(job)
 
         # ── Stage 2: TRF1 Processual enrichment ─────────────────
 
@@ -1741,6 +1949,10 @@ def _run_pipeline(job_id: str) -> None:
                             row["valor_causa"] = public_payload.get("valor_causa", "")
                             row["situacao_pje"] = public_payload.get("situacao", "")
                             row["orgao_julgador_pje"] = public_payload.get("orgao_julgador", "")
+                            row["cessao_credito"] = public_payload.get("cessao_credito", "")
+                            row["cessao_detalhes"] = public_payload.get("cessao_detalhes", "")
+                            row["partes_cedentes"] = public_payload.get("partes_cedentes", "")
+                            row["partes_nao_cedentes"] = public_payload.get("partes_nao_cedentes", "")
                             row["publico_data"] = public_payload
                             row["publico_partes"] = public_payload.get("partes", [])
                             row["publico_movimentacoes"] = public_payload.get("movimentacoes", [])
@@ -1769,6 +1981,7 @@ def _run_pipeline(job_id: str) -> None:
                 job["official_not_found_rows"] = public_not_found_rows
                 _persist_job(job)
 
+        _refresh_credit_analysis(job)
         job["status"] = "done"
         job["progress"]["stage"] = "done"
         _persist_job(job)
@@ -1815,6 +2028,7 @@ def pipeline_start(payload: dict = Body(...)):
         "official_event_rows": [],
         "official_document_rows": [],
         "official_not_found_rows": [],
+        "credit_analysis_rows": [],
         "error": None,
     }
     _persist_job(jobs[job_id])
@@ -1848,6 +2062,10 @@ def pipeline_results(
     q: str = Query("", description="Filtro textual"),
     source: str = Query("all", description="all | processual | publico | both"),
     documents_only: bool = Query(False, description="Mostrar apenas processos com documentos"),
+    credit_type: str = Query("all", description="Tipo de crédito"),
+    receiving_status: str = Query("all", description="Situação de recebimento"),
+    opportunity_status: str = Query("all", description="Classificação sintética"),
+    cession_status: str = Query("all", description="Sim | Possível | Não"),
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
 ):
@@ -1868,6 +2086,10 @@ def pipeline_results(
     }
 
     q_lower = q.strip().lower()
+    credit_type_normalized = credit_type.strip().lower()
+    receiving_status_normalized = receiving_status.strip().lower()
+    opportunity_status_normalized = opportunity_status.strip().lower()
+    cession_status_normalized = cession_status.strip().lower()
     rows = job.get("rows", [])
     filtered: list[dict[str, Any]] = []
 
@@ -1890,6 +2112,32 @@ def pipeline_results(
             continue
         if documents_only and not (
             summary["processual_qtd_documentos"] or summary["publico_qtd_documentos"]
+        ):
+            continue
+        if (
+            credit_type_normalized
+            and credit_type_normalized != "all"
+            and str(summary.get("tipo_credito") or "").strip().lower() != credit_type_normalized
+        ):
+            continue
+        if (
+            receiving_status_normalized
+            and receiving_status_normalized != "all"
+            and str(summary.get("status_recebimento") or "").strip().lower()
+            != receiving_status_normalized
+        ):
+            continue
+        if (
+            opportunity_status_normalized
+            and opportunity_status_normalized != "all"
+            and str(summary.get("status_oportunidade") or "").strip().lower()
+            != opportunity_status_normalized
+        ):
+            continue
+        if (
+            cession_status_normalized
+            and cession_status_normalized != "all"
+            and str(summary.get("cessao_credito") or "").strip().lower() != cession_status_normalized
         ):
             continue
         if q_lower and q_lower not in _pipeline_search_blob(row):
@@ -1916,6 +2164,31 @@ def pipeline_results(
                     1
                     for r in filtered
                     if r["processual_qtd_documentos"] or r["publico_qtd_documentos"]
+                ),
+                "potential": sum(
+                    1
+                    for r in filtered
+                    if r.get("status_oportunidade") == "potencial_oportunidade"
+                ),
+                "cession": sum(
+                    1
+                    for r in filtered
+                    if r.get("status_oportunidade") == "descartar_com_indicio_de_cessao"
+                ),
+                "paid_or_lifted": sum(
+                    1
+                    for r in filtered
+                    if r.get("status_oportunidade") == "descartar_pago_ou_em_levantamento"
+                ),
+                "receiving_pending": sum(
+                    1
+                    for r in filtered
+                    if r.get("status_recebimento") == "pendente"
+                ),
+                "manual_review": sum(
+                    1
+                    for r in filtered
+                    if r.get("status_oportunidade") == "revisar_manual"
                 ),
             },
         },
@@ -2048,6 +2321,7 @@ def pipeline_export(job_id: str):
         movement_rows=movement_rows_data,
         movement_complement_rows=movement_complement_rows_data,
         subject_rows=subject_rows_data,
+        credit_analysis_rows=job.get("credit_analysis_rows", []),
         processual_process_rows=processual_process_rows,
         processual_party_rows=processual_party_rows,
         processual_event_rows=processual_event_rows,

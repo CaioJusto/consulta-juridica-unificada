@@ -142,6 +142,80 @@ function formatDate(raw: string): string {
   }
 }
 
+function creditTypeLabel(value: string): string {
+  if (!value) return "A classificar";
+  if (value === "Precatorio/RPV") return "Precatório/RPV";
+  if (value === "Precatorio") return "Precatório";
+  if (value === "Fora do foco") return "Fora do foco";
+  return value;
+}
+
+function receivingStatusLabel(value: string): string {
+  switch (value) {
+    case "pendente":
+      return "Ainda não recebido";
+    case "recebido_ou_em_levantamento":
+      return "Pago ou em levantamento";
+    case "fora_do_foco":
+      return "Fora do foco";
+    case "revisar_manual":
+      return "Revisar manualmente";
+    default:
+      return "Sem leitura consolidada";
+  }
+}
+
+function opportunityStatusLabel(value: string): string {
+  switch (value) {
+    case "potencial_oportunidade":
+      return "Potencial oportunidade";
+    case "descartar_com_indicio_de_cessao":
+      return "Com indício de cessão";
+    case "descartar_pago_ou_em_levantamento":
+      return "Pago ou em levantamento";
+    case "fora_do_foco":
+      return "Fora do foco";
+    case "revisar_manual":
+      return "Revisar manualmente";
+    default:
+      return "Sem classificação";
+  }
+}
+
+function cessionStatusLabel(value: string): string {
+  if (value === "Sim") return "Cessão confirmada";
+  if (value === "Possível") return "Cessão possível";
+  if (value === "Não") return "Sem cessão";
+  return "Sem leitura";
+}
+
+function badgeTone(
+  value: string,
+  type: "credit" | "receiving" | "opportunity" | "cession",
+): string {
+  if (type === "credit") {
+    if (value === "Precatorio" || value === "RPV" || value === "Precatorio/RPV") {
+      return "border-blue-500/30 text-blue-700 dark:text-blue-300";
+    }
+    return "border-border text-muted-foreground";
+  }
+  if (type === "receiving") {
+    if (value === "pendente") return "border-amber-500/30 text-amber-700 dark:text-amber-300";
+    if (value === "recebido_ou_em_levantamento") return "border-emerald-500/30 text-emerald-700 dark:text-emerald-300";
+    return "border-border text-muted-foreground";
+  }
+  if (type === "opportunity") {
+    if (value === "potencial_oportunidade") return "border-sky-500/30 text-sky-700 dark:text-sky-300";
+    if (value === "descartar_com_indicio_de_cessao") return "border-orange-500/30 text-orange-700 dark:text-orange-300";
+    if (value === "descartar_pago_ou_em_levantamento") return "border-emerald-500/30 text-emerald-700 dark:text-emerald-300";
+    return "border-border text-muted-foreground";
+  }
+  if (value === "Sim") return "border-orange-500/30 text-orange-700 dark:text-orange-300";
+  if (value === "Possível") return "border-amber-500/30 text-amber-700 dark:text-amber-300";
+  if (value === "Não") return "border-emerald-500/30 text-emerald-700 dark:text-emerald-300";
+  return "border-border text-muted-foreground";
+}
+
 function estimateTimeRemaining(
   done: number,
   total: number,
@@ -212,6 +286,17 @@ interface PipelineRow {
   qtd_movimentos: number;
   tribunal: string;
   datajud_movimentos: DataJudMovimento[]; // raw for detail panel
+  tipo_credito: string;
+  status_recebimento: string;
+  motivo_recebimento: string;
+  status_oportunidade: string;
+  motivos_status: string;
+  cessao_credito: string;
+  cessao_detalhes: string;
+  partes_cedentes: string;
+  partes_nao_cedentes: string;
+  movimentos_codigos_detectados: string;
+  assuntos_codigos_detectados: string;
   // ── TRF1 Processual ──────────────────────────────────────
   processual_status: EnrichStatus;
   polo_ativo_nome: string;
@@ -310,6 +395,62 @@ interface PipelineJobSummary {
   enrich_publico: boolean;
 }
 
+interface PipelineResultCounts {
+  all: number;
+  processual_found: number;
+  publico_found: number;
+  with_documents: number;
+  potential: number;
+  cession: number;
+  paid_or_lifted: number;
+  receiving_pending: number;
+  manual_review: number;
+}
+
+const CREDIT_TYPE_OPTIONS = [
+  { value: "all", label: "Todos os créditos" },
+  { value: "Precatorio", label: "Só precatório" },
+  { value: "RPV", label: "Só RPV" },
+  { value: "Precatorio/RPV", label: "Precatorio/RPV" },
+  { value: "Fora do foco", label: "Fora do foco" },
+];
+
+const RECEIVING_STATUS_OPTIONS = [
+  { value: "all", label: "Qualquer recebimento" },
+  { value: "pendente", label: "Ainda não recebido" },
+  { value: "recebido_ou_em_levantamento", label: "Pago ou em levantamento" },
+  { value: "revisar_manual", label: "Revisar manualmente" },
+  { value: "fora_do_foco", label: "Fora do foco" },
+];
+
+const OPPORTUNITY_STATUS_OPTIONS = [
+  { value: "all", label: "Qualquer classificação" },
+  { value: "potencial_oportunidade", label: "Potencial oportunidade" },
+  { value: "descartar_com_indicio_de_cessao", label: "Com indício de cessão" },
+  { value: "descartar_pago_ou_em_levantamento", label: "Pago ou em levantamento" },
+  { value: "revisar_manual", label: "Revisar manualmente" },
+  { value: "fora_do_foco", label: "Fora do foco" },
+];
+
+const CESSION_STATUS_OPTIONS = [
+  { value: "all", label: "Qualquer cessão" },
+  { value: "Sim", label: "Cessão confirmada" },
+  { value: "Possível", label: "Cessão possível" },
+  { value: "Não", label: "Sem cessão" },
+];
+
+const EMPTY_RESULT_COUNTS: PipelineResultCounts = {
+  all: 0,
+  processual_found: 0,
+  publico_found: 0,
+  with_documents: 0,
+  potential: 0,
+  cession: 0,
+  paid_or_lifted: 0,
+  receiving_pending: 0,
+  manual_review: 0,
+};
+
 // ─── row factory ─────────────────────────────────────────────
 
 function makeRow(p: DataJudProcesso, tribunal: string): PipelineRow {
@@ -333,6 +474,17 @@ function makeRow(p: DataJudProcesso, tribunal: string): PipelineRow {
     qtd_movimentos: p.movimentos.length,
     tribunal,
     datajud_movimentos: sorted,
+    tipo_credito: "",
+    status_recebimento: "",
+    motivo_recebimento: "",
+    status_oportunidade: "",
+    motivos_status: "",
+    cessao_credito: "",
+    cessao_detalhes: "",
+    partes_cedentes: "",
+    partes_nao_cedentes: "",
+    movimentos_codigos_detectados: "",
+    assuntos_codigos_detectados: "",
     // TRF1 Processual
     processual_status: "pending",
     polo_ativo_nome: "",
@@ -404,6 +556,17 @@ function mapPipelineRow(r: Record<string, unknown>, id: string): PipelineRow {
     primeira_movimentacao: String(r.primeira_movimentacao || ""),
     ultima_mov_data: String(r.ultima_mov_data || ""),
     ultima_mov_nome: String(r.ultima_mov_nome || r.ultima_movimentacao || ""),
+    tipo_credito: String(r.tipo_credito || ""),
+    status_recebimento: String(r.status_recebimento || ""),
+    motivo_recebimento: String(r.motivo_recebimento || ""),
+    status_oportunidade: String(r.status_oportunidade || ""),
+    motivos_status: String(r.motivos_status || ""),
+    cessao_credito: String(r.cessao_credito || publicoData?.cessao_credito || ""),
+    cessao_detalhes: String(r.cessao_detalhes || publicoData?.cessao_detalhes || ""),
+    partes_cedentes: String(r.partes_cedentes || publicoData?.partes_cedentes || ""),
+    partes_nao_cedentes: String(r.partes_nao_cedentes || publicoData?.partes_nao_cedentes || ""),
+    movimentos_codigos_detectados: String(r.movimentos_codigos_detectados || ""),
+    assuntos_codigos_detectados: String(r.assuntos_codigos_detectados || ""),
     polo_ativo_nome: String(r.polo_ativo_nome || ""),
     polo_ativo_cpf: String(r.polo_ativo_cpf || ""),
     polo_passivo_nome: String(r.polo_passivo_nome || ""),
@@ -510,8 +673,13 @@ export function PipelineTab() {
   const [resultQuery, setResultQuery] = useState("");
   const [resultSource, setResultSource] = useState("all");
   const [documentsOnly, setDocumentsOnly] = useState(false);
+  const [resultCreditType, setResultCreditType] = useState("all");
+  const [resultReceivingStatus, setResultReceivingStatus] = useState("all");
+  const [resultOpportunityStatus, setResultOpportunityStatus] = useState("all");
+  const [resultCessionStatus, setResultCessionStatus] = useState("all");
   const [resultOffset, setResultOffset] = useState(0);
   const [resultTotal, setResultTotal] = useState(0);
+  const [resultCounts, setResultCounts] = useState<PipelineResultCounts>(EMPTY_RESULT_COUNTS);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [detailLoadingNumero, setDetailLoadingNumero] = useState<string | null>(null);
   const [previewOffset, setPreviewOffset] = useState(0);
@@ -678,6 +846,10 @@ export function PipelineTab() {
       });
       if (resultQuery.trim()) params.set("q", resultQuery.trim());
       if (documentsOnly) params.set("documents_only", "true");
+      if (resultCreditType !== "all") params.set("credit_type", resultCreditType);
+      if (resultReceivingStatus !== "all") params.set("receiving_status", resultReceivingStatus);
+      if (resultOpportunityStatus !== "all") params.set("opportunity_status", resultOpportunityStatus);
+      if (resultCessionStatus !== "all") params.set("cession_status", resultCessionStatus);
       const res = await fetch(`${API_BASE}/api/pipeline/results/${jobId}?${params.toString()}`);
       const json = await res.json();
       if (!json.success) {
@@ -689,12 +861,26 @@ export function PipelineTab() {
       );
       setRows(pageRows);
       setResultTotal(Number(json.data?.total || 0));
+      setResultCounts({
+        ...EMPTY_RESULT_COUNTS,
+        ...(json.data?.counts || {}),
+      });
     } catch {
       setError("Erro ao carregar resultados filtrados.");
     } finally {
       setResultsLoading(false);
     }
-  }, [documentsOnly, jobId, resultOffset, resultQuery, resultSource]);
+  }, [
+    documentsOnly,
+    jobId,
+    resultCessionStatus,
+    resultCreditType,
+    resultOffset,
+    resultOpportunityStatus,
+    resultQuery,
+    resultReceivingStatus,
+    resultSource,
+  ]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -809,6 +995,7 @@ export function PipelineTab() {
     setRowCount(0);
     setResultOffset(0);
     setResultTotal(0);
+    setResultCounts(EMPTY_RESULT_COUNTS);
     setPreviewOffset(0);
 
     if (config.limit !== "all") {
@@ -946,6 +1133,7 @@ export function PipelineTab() {
     setRowCount(0);
     setResultOffset(0);
     setResultTotal(0);
+    setResultCounts(EMPTY_RESULT_COUNTS);
     setPreviewOffset(0);
     void loadRecentJobs();
   }
@@ -953,7 +1141,15 @@ export function PipelineTab() {
   useEffect(() => {
     setResultOffset(0);
     setPreviewOffset(0);
-  }, [documentsOnly, resultQuery, resultSource]);
+  }, [
+    documentsOnly,
+    resultCessionStatus,
+    resultCreditType,
+    resultOpportunityStatus,
+    resultQuery,
+    resultReceivingStatus,
+    resultSource,
+  ]);
 
   // ─── Excel export (server-side) ──────────────────────────
 
@@ -1066,8 +1262,8 @@ export function PipelineTab() {
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground -mt-2">
-          Coleta paginada de todos os processos do DataJud + enriquecimento em lote com partes, advogados, valor da causa.
-          Dados completos de cada fonte exibidos independentemente.
+          Coleta paginada de todos os processos do DataJud + enriquecimento em lote com partes, advogados, valor da causa e texto público de documentos.
+          O pipeline consolida sinais de precatório/RPV, recebimento e cessão para você filtrar melhor.
         </p>
 
         <div className="rounded-lg border border-blue-200/70 bg-blue-50/70 px-3 py-3 text-xs text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/20 dark:text-blue-100">
@@ -1075,6 +1271,30 @@ export function PipelineTab() {
           <p className="mt-1 text-blue-800/80 dark:text-blue-100/80">
             O pipeline roda no backend. Fechar a aba ou sair da página não encerra o job; ele só para se o serviço for reiniciado ou se você mandar interromper.
           </p>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Passo 1</p>
+            <p className="mt-1 text-xs font-medium">Delimite o universo no DataJud</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Comece por classe, assunto, movimentação, sistema, formato e preset de crédito.
+            </p>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Passo 2</p>
+            <p className="mt-1 text-xs font-medium">Ative os enriquecimentos</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              TRF1 Processual traz partes e movimentações; PJe ajuda a confirmar valor, documentos e cessão.
+            </p>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Passo 3</p>
+            <p className="mt-1 text-xs font-medium">Filtre o resultado consolidado</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Use os filtros de crédito, recebimento e cessão para achar precatórios/RPVs ainda aproveitáveis.
+            </p>
+          </div>
         </div>
 
         {recentJobs.length > 0 && (
@@ -1885,7 +2105,7 @@ export function PipelineTab() {
           </div>
           {["done", "paused", "aborted"].includes(phase) && (
             <div className="px-3 py-3 border-b border-border bg-card">
-              <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_180px_auto] gap-3">
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.4fr)_180px_180px_180px] gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] text-muted-foreground">Filtro textual</Label>
                   <Input
@@ -1909,11 +2129,80 @@ export function PipelineTab() {
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Tipo de crédito</Label>
+                  <Select value={resultCreditType} onValueChange={setResultCreditType}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CREDIT_TYPE_OPTIONS.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Recebimento</Label>
+                  <Select value={resultReceivingStatus} onValueChange={setResultReceivingStatus}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {RECEIVING_STATUS_OPTIONS.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-1 lg:grid-cols-[180px_180px_180px_auto] gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Cessão de crédito</Label>
+                  <Select value={resultCessionStatus} onValueChange={setResultCessionStatus}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CESSION_STATUS_OPTIONS.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground">Classificação</Label>
+                  <Select value={resultOpportunityStatus} onValueChange={setResultOpportunityStatus}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {OPPORTUNITY_STATUS_OPTIONS.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="flex items-end gap-2">
                   <div className="flex items-center gap-2 h-8 px-3 rounded-md border border-border">
                     <Switch checked={documentsOnly} onCheckedChange={setDocumentsOnly} />
                     <span className="text-xs text-muted-foreground whitespace-nowrap">Só com documentos</span>
                   </div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                  <ResultMetric label="Potenciais" value={resultCounts.potential} />
+                  <ResultMetric label="Pendentes" value={resultCounts.receiving_pending} />
+                  <ResultMetric label="Cessão" value={resultCounts.cession} />
+                  <ResultMetric label="Pagos" value={resultCounts.paid_or_lifted} />
+                  <ResultMetric label="Revisar" value={resultCounts.manual_review} />
                 </div>
               </div>
               <div className="flex items-center justify-between mt-3">
@@ -1990,6 +2279,9 @@ export function PipelineTab() {
                     <span className="flex items-center gap-1"><Building2 className="w-3 h-3" /> Órgão</span>
                   </th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Classe</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Crédito</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Recebimento</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">Cessão</th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
                     <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> Ajuiz.</span>
                   </th>
@@ -2099,6 +2391,59 @@ function RowDetailDialog({
             {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
           </DialogTitle>
         </DialogHeader>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <AnalysisCard
+            label="Tipo de crédito"
+            value={creditTypeLabel(row.tipo_credito)}
+            tone={badgeTone(row.tipo_credito, "credit")}
+            detail={row.assuntos_codigos_detectados ? `Assuntos: ${row.assuntos_codigos_detectados}` : ""}
+          />
+          <AnalysisCard
+            label="Recebimento"
+            value={receivingStatusLabel(row.status_recebimento)}
+            tone={badgeTone(row.status_recebimento, "receiving")}
+            detail={row.motivo_recebimento}
+          />
+          <AnalysisCard
+            label="Cessão"
+            value={cessionStatusLabel(row.cessao_credito)}
+            tone={badgeTone(row.cessao_credito, "cession")}
+            detail={row.cessao_detalhes}
+          />
+          <AnalysisCard
+            label="Classificação"
+            value={opportunityStatusLabel(row.status_oportunidade)}
+            tone={badgeTone(row.status_oportunidade, "opportunity")}
+            detail={row.motivos_status}
+          />
+        </div>
+
+        {(row.partes_cedentes || row.partes_nao_cedentes || row.movimentos_codigos_detectados) && (
+          <div className="rounded-lg border border-border/70 bg-muted/20 p-3 space-y-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Sinais para análise patrimonial
+            </p>
+            {row.partes_cedentes ? (
+              <p className="text-xs">
+                <span className="font-medium">Partes cedentes: </span>
+                {row.partes_cedentes}
+              </p>
+            ) : null}
+            {row.partes_nao_cedentes ? (
+              <p className="text-xs">
+                <span className="font-medium">Partes não cedentes: </span>
+                {row.partes_nao_cedentes}
+              </p>
+            ) : null}
+            {row.movimentos_codigos_detectados ? (
+              <p className="text-[11px] text-muted-foreground">
+                <span className="font-medium text-foreground">Códigos de movimentação detectados: </span>
+                {row.movimentos_codigos_detectados}
+              </p>
+            ) : null}
+          </div>
+        )}
 
         <Tabs defaultValue="datajud" className="mt-2">
           <TabsList className="flex flex-wrap h-auto gap-1 bg-muted/60 p-1 rounded-lg">
@@ -2406,6 +2751,10 @@ function RowDetailDialog({
                     <DInfoRow label="Processo referência" value={publico?.processo_referencia || ""} />
                     <DInfoRow label="Polo ativo (resumo)" value={publico?.polo_ativo || ""} />
                     <DInfoRow label="Polo passivo (resumo)" value={publico?.polo_passivo || ""} />
+                    <DInfoRow label="Cessão de crédito" value={row.cessao_credito} />
+                    <DInfoRow label="Detalhes da cessão" value={row.cessao_detalhes} />
+                    <DInfoRow label="Partes cedentes" value={row.partes_cedentes} />
+                    <DInfoRow label="Partes não cedentes" value={row.partes_nao_cedentes} />
                     <DInfoRow label="Outros interessados" value={publico?.outros_interessados || ""} />
                     <DInfoRow label="Endereço do órgão" value={publico?.endereco_orgao_julgador || ""} />
                   </div>
@@ -2583,6 +2932,45 @@ function DInfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function AnalysisBadge({ label, tone }: { label: string; tone: string }) {
+  return (
+    <Badge variant="outline" className={`text-[9px] ${tone}`}>
+      {label}
+    </Badge>
+  );
+}
+
+function AnalysisCard({
+  label,
+  value,
+  tone,
+  detail,
+}: {
+  label: string;
+  value: string;
+  tone: string;
+  detail?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
+      <div className="mt-2">
+        <AnalysisBadge label={value} tone={tone} />
+      </div>
+      {detail ? <p className="mt-2 text-[11px] text-muted-foreground">{detail}</p> : null}
+    </div>
+  );
+}
+
+function ResultMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-muted/20 px-2 py-1.5">
+      <p className="text-[9px] uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className="text-sm font-semibold">{value.toLocaleString("pt-BR")}</p>
+    </div>
+  );
+}
+
 function StatBadge({
   icon,
   label,
@@ -2736,6 +3124,24 @@ function ResultRow({
       </td>
       <td className="px-3 py-2.5 max-w-[120px]">
         <span className="truncate block text-[11px]" title={row.classe}>{row.classe}</span>
+      </td>
+      <td className="px-3 py-2.5 whitespace-nowrap">
+        <AnalysisBadge
+          label={creditTypeLabel(row.tipo_credito)}
+          tone={badgeTone(row.tipo_credito, "credit")}
+        />
+      </td>
+      <td className="px-3 py-2.5 whitespace-nowrap">
+        <AnalysisBadge
+          label={receivingStatusLabel(row.status_recebimento)}
+          tone={badgeTone(row.status_recebimento, "receiving")}
+        />
+      </td>
+      <td className="px-3 py-2.5 whitespace-nowrap">
+        <AnalysisBadge
+          label={cessionStatusLabel(row.cessao_credito)}
+          tone={badgeTone(row.cessao_credito, "cession")}
+        />
       </td>
       <td className="px-3 py-2.5 whitespace-nowrap text-muted-foreground text-[11px]">
         {row.data_ajuizamento}
