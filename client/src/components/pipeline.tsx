@@ -57,6 +57,7 @@ import {
   Hash,
   Eye,
   X,
+  Trash2,
 } from "lucide-react";
 import type {
   TribunalOption,
@@ -1138,6 +1139,60 @@ export function PipelineTab() {
     });
   }
 
+  async function deleteJob(targetJobId: string) {
+    const confirmed = window.confirm(
+      "Excluir este job vai remover o histórico salvo. Se ele ainda estiver rodando, a execução será interrompida.",
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/pipeline/jobs/${targetJobId}`, {
+        method: "DELETE",
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setError(json.error || "Erro ao excluir job.");
+        return;
+      }
+      if (jobId === targetJobId) {
+        resetPipeline();
+      } else {
+        void loadRecentJobs();
+      }
+    } catch {
+      setError("Erro ao excluir job.");
+    }
+  }
+
+  async function purgeJobs(scope: "finished" | "all") {
+    const confirmed = window.confirm(
+      scope === "all"
+        ? "Isso vai parar e excluir todos os jobs, inclusive os que estiverem em execução. Continuar?"
+        : "Isso vai excluir os jobs antigos já finalizados. Continuar?",
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/pipeline/jobs/purge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setError(json.error || "Erro ao limpar jobs.");
+        return;
+      }
+      if (scope === "all") {
+        resetPipeline();
+      } else {
+        void loadRecentJobs();
+      }
+    } catch {
+      setError("Erro ao limpar jobs.");
+    }
+  }
+
   function resetPipeline() {
     if (pollRef.current) clearInterval(pollRef.current);
     localStorage.removeItem("activeJobId");
@@ -1324,9 +1379,29 @@ export function PipelineTab() {
                   Reabra uma execução em andamento ou consulte um job já concluído.
                 </p>
               </div>
-              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => void loadRecentJobs()}>
-                Atualizar
-              </Button>
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => void loadRecentJobs()}>
+                  Atualizar
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => void purgeJobs("finished")}
+                >
+                  <Trash2 className="w-3 h-3 mr-1" />
+                  Excluir antigos
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => void purgeJobs("all")}
+                >
+                  <Trash2 className="w-3 h-3 mr-1" />
+                  Parar e excluir tudo
+                </Button>
+              </div>
             </div>
             <div className="mt-3 grid gap-2">
               {recentJobs.slice(0, 5).map((job) => (
@@ -1346,22 +1421,33 @@ export function PipelineTab() {
                       {job.total ? ` de ${job.total.toLocaleString("pt-BR")}` : ""}
                     </p>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 text-xs"
-                    onClick={() => {
-                      localStorage.setItem("activeJobId", job.id);
-                      syncedJobConfigRef.current = null;
-                      setJobId(job.id);
-                      setSelectedRow(null);
-                      setError("");
-                      setResultOffset(0);
-                      setPreviewOffset(0);
-                    }}
-                  >
-                    Abrir job
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => {
+                        localStorage.setItem("activeJobId", job.id);
+                        syncedJobConfigRef.current = null;
+                        setJobId(job.id);
+                        setSelectedRow(null);
+                        setError("");
+                        setResultOffset(0);
+                        setPreviewOffset(0);
+                      }}
+                    >
+                      Abrir job
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 text-xs text-destructive hover:text-destructive"
+                      onClick={() => void deleteJob(job.id)}
+                    >
+                      <Trash2 className="w-3 h-3 mr-1" />
+                      Excluir
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>

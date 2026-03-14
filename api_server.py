@@ -33,7 +33,12 @@ from fastapi import FastAPI, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import asdict
 from trf1_client import TRF1Client, TRF1SearchTooBroadError, formatar_numero_processo
-from pipeline_store import load_pipeline_jobs, save_pipeline_job
+from pipeline_store import (
+    delete_all_pipeline_jobs,
+    delete_pipeline_job,
+    load_pipeline_jobs,
+    save_pipeline_job,
+)
 
 app = FastAPI()
 app.add_middleware(
@@ -1098,10 +1103,29 @@ jobs: dict[str, dict] = load_pipeline_jobs()
 def _persist_job(job: dict[str, Any] | None) -> None:
     if not job:
         return
+    if job.get("_deleted"):
+        try:
+            delete_pipeline_job(str(job.get("id") or ""))
+        except Exception as exc:
+            logger.warning("Falha ao excluir job %s: %s", job.get("id"), exc)
+        return
     try:
         save_pipeline_job(job)
     except Exception as exc:
         logger.warning("Falha ao persistir job %s: %s", job.get("id"), exc)
+
+
+def _delete_job(job_id: str) -> bool:
+    job = jobs.get(job_id)
+    if job:
+        job["status"] = "stopped"
+        job["_deleted"] = True
+    try:
+        delete_pipeline_job(job_id)
+    except Exception as exc:
+        logger.warning("Falha ao remover job %s do store: %s", job_id, exc)
+    removed = jobs.pop(job_id, None)
+    return removed is not None or job is not None
 
 
 def _active_passive_names(partes: list[dict[str, Any]]) -> tuple[str, str]:
@@ -2368,6 +2392,40 @@ def pipeline_list_jobs():
             for j in sorted(jobs.values(), key=lambda x: x["created_at"], reverse=True)[:10]
         ],
     }
+
+
+@app.delete("/api/pipeline/jobs/{job_id}")
+def pipeline_delete_job(job_id: str):
+    """Delete one job and mark any running worker for stop."""
+    if not _delete_job(job_id):
+        return {"success": False, "error": "Job not found"}
+    return {"success": True}
+
+
+@app.post("/api/pipeline/jobs/purge")
+def pipeline_purge_jobs(payload: dict = Body(...)):
+    """Delete finished jobs or force stop and delete all jobs."""
+    scope = str(payload.get("scope") or "finished").strip().lower()
+    if scope not in {"finished", "all"}:
+        return {"success": False, "error": "Escopo inválido"}
+
+    deleted = 0
+    if scope == "all":
+        for job_id in list(jobs.keys()):
+            if _delete_job(job_id):
+                deleted += 1
+        try:
+            delete_all_pipeline_jobs()
+        except Exception as exc:
+            logger.warning("Falha ao limpar store de jobs: %s", exc)
+        return {"success": True, "deleted": deleted}
+
+    removable_statuses = {"done", "stopped", "error", "aborted", "interrupted"}
+    for job_id, job in list(jobs.items()):
+        if str(job.get("status") or "").lower() in removable_statuses:
+            if _delete_job(job_id):
+                deleted += 1
+    return {"success": True, "deleted": deleted}
 
 
 if __name__ == "__main__":

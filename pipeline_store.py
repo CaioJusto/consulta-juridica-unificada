@@ -99,3 +99,19 @@ def save_pipeline_job(job: dict[str, Any]) -> None:
                 ),
             )
             conn.commit()
+
+
+def delete_pipeline_job(job_id: str) -> None:
+    init_pipeline_store()
+    with _LOCK:
+        with _connect() as conn:
+            conn.execute("DELETE FROM pipeline_jobs WHERE id = ?", (str(job_id),))
+            conn.commit()
+
+
+def delete_all_pipeline_jobs() -> None:
+    init_pipeline_store()
+    with _LOCK:
+        with _connect() as conn:
+            conn.execute("DELETE FROM pipeline_jobs")
+            conn.commit()
