@@ -248,6 +248,9 @@ interface PipelineConfig {
   orgaoJulgadorCodigo: string;
   orgaoJulgadorNome: string;
   grau: string;
+  sistemaCodigo: string;
+  formatoCodigo: string;
+  creditPreset: string;
   dataInicio: string;
   dataFim: string;
   dataAtualizacaoInicio: string;
@@ -281,6 +284,30 @@ interface PipelineState {
   stage2: StageState;
   stage3: StageState;
   datajudGrandTotal: number;
+}
+
+interface FilterOption {
+  codigo: string;
+  nome: string;
+}
+
+interface CreditPresetOption {
+  key: string;
+  label: string;
+  description: string;
+  default_grau: string;
+}
+
+interface PipelineJobSummary {
+  id: string;
+  status: string;
+  created_at: string;
+  collected: number;
+  total: number;
+  tribunal: string;
+  numero_processo: string;
+  enrich_processual: boolean;
+  enrich_publico: boolean;
 }
 
 // ─── row factory ─────────────────────────────────────────────
@@ -344,7 +371,8 @@ const INITIAL_PIPELINE: PipelineState = {
   datajudGrandTotal: 0,
 };
 
-const RESULTS_PAGE_SIZE = 100;
+const RESULTS_PAGE_SIZE = 20;
+const PREVIEW_BUFFER_SIZE = 100;
 
 function mapPipelineRow(r: Record<string, unknown>, id: string): PipelineRow {
   const processualData = (r.processual_data as Processo | null | undefined) ?? null;
@@ -429,6 +457,9 @@ export function PipelineTab() {
     orgaoJulgadorCodigo: "",
     orgaoJulgadorNome: "",
     grau: "",
+    sistemaCodigo: "__all__",
+    formatoCodigo: "__all__",
+    creditPreset: "__none__",
     dataInicio: "",
     dataFim: "",
     dataAtualizacaoInicio: "",
@@ -465,6 +496,9 @@ export function PipelineTab() {
   const [movimentoLoading, setMovimentoLoading] = useState(false);
   const [orgaoQuery, setOrgaoQuery] = useState("");
   const [orgaoResults, setOrgaoResults] = useState<SgtOption[]>([]);
+  const [sistemaOptions, setSistemaOptions] = useState<FilterOption[]>([]);
+  const [formatoOptions, setFormatoOptions] = useState<FilterOption[]>([]);
+  const [creditPresetOptions, setCreditPresetOptions] = useState<CreditPresetOption[]>([]);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [pipelineState, setPipelineState] = useState<PipelineState>(INITIAL_PIPELINE);
@@ -480,8 +514,31 @@ export function PipelineTab() {
   const [resultTotal, setResultTotal] = useState(0);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [detailLoadingNumero, setDetailLoadingNumero] = useState<string | null>(null);
+  const [previewOffset, setPreviewOffset] = useState(0);
+  const [recentJobs, setRecentJobs] = useState<PipelineJobSummary[]>([]);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadRecentJobs = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/pipeline/jobs`);
+      const payload = await response.json();
+      if (payload.success) {
+        setRecentJobs(payload.data || []);
+        if (!jobId) {
+          const activeJob = (payload.data || []).find((item: PipelineJobSummary) =>
+            ["running", "paused"].includes(item.status),
+          );
+          if (activeJob) {
+            localStorage.setItem("activeJobId", activeJob.id);
+            setJobId(activeJob.id);
+          }
+        }
+      }
+    } catch {
+      // ignore recent-jobs load failures
+    }
+  }, [jobId]);
 
   // On mount: resume polling if there's an active job in localStorage
   useEffect(() => {
@@ -509,6 +566,13 @@ export function PipelineTab() {
         }
         const data = j.data;
         const progress = data.progress;
+        if (data.config) {
+          setConfig((prev) => ({
+            ...prev,
+            enrichProcessual: Boolean(data.config.enrich_processual ?? prev.enrichProcessual),
+            enrichPublico: Boolean(data.config.enrich_publico ?? prev.enrichPublico),
+          }));
+        }
 
         // Map server status to phase
         const statusMap: Record<string, Phase> = {
@@ -520,6 +584,7 @@ export function PipelineTab() {
               : "collecting",
           paused: "paused",
           stopped: "aborted",
+          interrupted: "aborted",
           done: "done",
           error: "idle",
         };
@@ -570,6 +635,13 @@ export function PipelineTab() {
             mapPipelineRow(r, `${jobId}-${i}`)
           );
           setRows(serverRows);
+          setPreviewOffset((prev) => {
+            const maxOffset = Math.max(
+              0,
+              Math.floor(Math.max(0, serverRows.length - 1) / RESULTS_PAGE_SIZE) * RESULTS_PAGE_SIZE,
+            );
+            return Math.min(prev, maxOffset);
+          });
         }
 
         if (data.error) setError(data.error);
@@ -580,6 +652,7 @@ export function PipelineTab() {
           if (data.status === "done" || data.status === "stopped") {
             localStorage.removeItem("activeJobId");
           }
+          void loadRecentJobs();
         }
       } catch {
         // Network error — keep polling
@@ -592,7 +665,7 @@ export function PipelineTab() {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [jobId]);
+  }, [config.enrichProcessual, config.enrichPublico, jobId, loadRecentJobs]);
 
   const loadResults = useCallback(async () => {
     if (!jobId) return;
@@ -690,6 +763,27 @@ export function PipelineTab() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      fetch(`${API_BASE}/api/datajud/filter-options?tribunal=${config.tribunal}&kind=sistema`).then((r) => r.json()).catch(() => ({ success: false })),
+      fetch(`${API_BASE}/api/datajud/filter-options?tribunal=${config.tribunal}&kind=formato`).then((r) => r.json()).catch(() => ({ success: false })),
+      fetch(`${API_BASE}/api/datajud/presets`).then((r) => r.json()).catch(() => ({ success: false })),
+    ]).then(([sistemas, formatos, presets]) => {
+      if (cancelled) return;
+      setSistemaOptions(sistemas.success ? (sistemas.data || []) : []);
+      setFormatoOptions(formatos.success ? (formatos.data || []) : []);
+      setCreditPresetOptions(presets.success ? (presets.data || []) : []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [config.tribunal]);
+
+  useEffect(() => {
+    void loadRecentJobs();
+  }, [loadRecentJobs]);
+
   function upd<K extends keyof PipelineConfig>(key: K, value: PipelineConfig[K]) {
     setConfig((prev) => ({ ...prev, [key]: value }));
   }
@@ -715,6 +809,16 @@ export function PipelineTab() {
     setRowCount(0);
     setResultOffset(0);
     setResultTotal(0);
+    setPreviewOffset(0);
+
+    if (config.limit !== "all") {
+      const numericLimit = Number.parseInt(config.limit.trim(), 10);
+      if (Number.isNaN(numericLimit) || numericLimit <= 0) {
+        setError("Informe uma quantidade válida de processos ou marque 'Buscar todos'.");
+        setPhase("idle");
+        return;
+      }
+    }
 
     // Build payload for backend
     const payload: Record<string, unknown> = {
@@ -755,6 +859,15 @@ export function PipelineTab() {
       if (n !== null) payload.orgao_julgador_codigo = n;
     }
     if (config.grau && config.grau !== "all" && config.grau !== "__all__") payload.grau = config.grau;
+    {
+      const n = parseIntOrNull(config.sistemaCodigo);
+      if (n !== null) payload.sistema_codigo = n;
+    }
+    {
+      const n = parseIntOrNull(config.formatoCodigo);
+      if (n !== null) payload.formato_codigo = n;
+    }
+    if (config.creditPreset !== "__none__") payload.credit_preset = config.creditPreset;
     if (config.dataInicio) payload.data_ajuizamento_inicio = config.dataInicio;
     if (config.dataFim) payload.data_ajuizamento_fim = config.dataFim;
     if (config.dataAtualizacaoInicio) payload.data_atualizacao_inicio = config.dataAtualizacaoInicio;
@@ -833,10 +946,13 @@ export function PipelineTab() {
     setRowCount(0);
     setResultOffset(0);
     setResultTotal(0);
+    setPreviewOffset(0);
+    void loadRecentJobs();
   }
 
   useEffect(() => {
     setResultOffset(0);
+    setPreviewOffset(0);
   }, [documentsOnly, resultQuery, resultSource]);
 
   // ─── Excel export (server-side) ──────────────────────────
@@ -885,6 +1001,9 @@ export function PipelineTab() {
     if (config.assuntosExcluir.length > 0) count++;
     if (config.orgaoJulgadorCodigo) count++;
     if (config.grau && config.grau !== "all" && config.grau !== "__all__") count++;
+    if (config.sistemaCodigo !== "__all__") count++;
+    if (config.formatoCodigo !== "__all__") count++;
+    if (config.creditPreset !== "__none__") count++;
     if (config.dataInicio || config.dataFim) count++;
     if (config.dataAtualizacaoInicio || config.dataAtualizacaoFim) count++;
     if (config.movimentoCodigo) count++;
@@ -907,8 +1026,18 @@ export function PipelineTab() {
   const enrichedPublicoCount = pipelineState.stage3.current || 0;
 
   const previewRows = rows;
-  const currentStart = resultTotal > 0 ? resultOffset + 1 : 0;
-  const currentEnd = resultTotal > 0 ? Math.min(resultOffset + previewRows.length, resultTotal) : previewRows.length;
+  const previewVisibleRows = previewRows.slice(previewOffset, previewOffset + RESULTS_PAGE_SIZE);
+  const tableRows = isDone || isPaused ? previewRows : previewVisibleRows;
+  const currentStart = isDone || isPaused
+    ? resultTotal > 0 ? resultOffset + 1 : 0
+    : previewRows.length > 0 ? previewOffset + 1 : 0;
+  const currentEnd = isDone || isPaused
+    ? resultTotal > 0 ? Math.min(resultOffset + previewRows.length, resultTotal) : previewRows.length
+    : previewRows.length > 0 ? Math.min(previewOffset + previewVisibleRows.length, previewRows.length) : 0;
+  const previewMaxOffset = Math.max(
+    0,
+    Math.floor(Math.max(0, previewRows.length - 1) / RESULTS_PAGE_SIZE) * RESULTS_PAGE_SIZE,
+  );
 
   const s1pct =
     pipelineState.stage1.total > 0
@@ -940,6 +1069,65 @@ export function PipelineTab() {
           Coleta paginada de todos os processos do DataJud + enriquecimento em lote com partes, advogados, valor da causa.
           Dados completos de cada fonte exibidos independentemente.
         </p>
+
+        <div className="rounded-lg border border-blue-200/70 bg-blue-50/70 px-3 py-3 text-xs text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/20 dark:text-blue-100">
+          <p className="font-medium">Execução em background confirmada</p>
+          <p className="mt-1 text-blue-800/80 dark:text-blue-100/80">
+            O pipeline roda no backend. Fechar a aba ou sair da página não encerra o job; ele só para se o serviço for reiniciado ou se você mandar interromper.
+          </p>
+        </div>
+
+        {recentJobs.length > 0 && (
+          <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-medium">Jobs recentes</p>
+                <p className="text-[10px] text-muted-foreground">
+                  Reabra uma execução em andamento ou consulte um job já concluído.
+                </p>
+              </div>
+              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => void loadRecentJobs()}>
+                Atualizar
+              </Button>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {recentJobs.slice(0, 5).map((job) => (
+                <div
+                  key={job.id}
+                  className="flex flex-col gap-2 rounded-md border border-border bg-background/70 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] font-medium">{job.numero_processo || job.tribunal}</span>
+                      <Badge variant="outline" className="text-[9px] uppercase">{job.status}</Badge>
+                      {job.enrich_processual ? <Badge variant="secondary" className="text-[9px]">TRF1</Badge> : null}
+                      {job.enrich_publico ? <Badge variant="secondary" className="text-[9px]">PJe</Badge> : null}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      {new Date(job.created_at).toLocaleString("pt-BR")} · {job.collected.toLocaleString("pt-BR")} coletados
+                      {job.total ? ` de ${job.total.toLocaleString("pt-BR")}` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={() => {
+                      localStorage.setItem("activeJobId", job.id);
+                      setJobId(job.id);
+                      setSelectedRow(null);
+                      setError("");
+                      setResultOffset(0);
+                      setPreviewOffset(0);
+                    }}
+                  >
+                    Abrir job
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Main filters */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -974,20 +1162,31 @@ export function PipelineTab() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="space-y-1.5 col-span-2 sm:col-span-1">
             <Label className="text-xs text-muted-foreground">Limite de processos</Label>
-            <Select value={config.limit} onValueChange={(v) => upd("limit", v)} disabled={isRunning || isPaused}>
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="100">100</SelectItem>
-                <SelectItem value="500">500</SelectItem>
-                <SelectItem value="1000">1.000</SelectItem>
-                <SelectItem value="5000">5.000</SelectItem>
-                <SelectItem value="10000">10.000</SelectItem>
-                <SelectItem value="50000">50.000</SelectItem>
-                <SelectItem value="all">Todos (sem limite)</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="space-y-2">
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={config.limit === "all" ? "" : config.limit}
+                onChange={(e) => upd("limit", e.target.value)}
+                placeholder={config.limit === "all" ? "Buscar todos os resultados" : "Ex: 99"}
+                className="h-8 text-xs"
+                disabled={isRunning || isPaused || config.limit === "all"}
+              />
+              <div className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+                <Switch
+                  checked={config.limit === "all"}
+                  onCheckedChange={(checked) => upd("limit", checked ? "all" : "100")}
+                  disabled={isRunning || isPaused}
+                />
+                <div>
+                  <p className="text-xs font-medium">Buscar todos</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Pagina automaticamente até esgotar a API do DataJud.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
           <div className="space-y-1.5 col-span-2 sm:col-span-1">
             <Label className="text-xs text-muted-foreground">Lote enriquecimento</Label>
@@ -1116,6 +1315,9 @@ export function PipelineTab() {
                       )}
                     </div>
                   )}
+                  <p className="text-[10px] text-muted-foreground">
+                    Digite o nome da movimentação e o sistema preenche o código oficial do SGT/CNJ.
+                  </p>
                 </div>
               </div>
             </div>
@@ -1193,6 +1395,79 @@ export function PipelineTab() {
                       <SelectItem value="SUP">Superior</SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <Database className="w-3 h-3" /> Sistema · Formato · Preset
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Sistema processual</Label>
+                  <Select
+                    value={config.sistemaCodigo}
+                    onValueChange={(v) => upd("sistemaCodigo", v)}
+                    disabled={isRunning || isPaused}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Qualquer sistema" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">Qualquer sistema</SelectItem>
+                      {sistemaOptions.map((item) => (
+                        <SelectItem key={item.codigo} value={String(item.codigo)}>
+                          {item.nome} ({item.codigo})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Formato</Label>
+                  <Select
+                    value={config.formatoCodigo}
+                    onValueChange={(v) => upd("formatoCodigo", v)}
+                    disabled={isRunning || isPaused}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Qualquer formato" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">Qualquer formato</SelectItem>
+                      {formatoOptions.map((item) => (
+                        <SelectItem key={item.codigo} value={String(item.codigo)}>
+                          {item.nome} ({item.codigo})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Preset de crédito</Label>
+                  <Select
+                    value={config.creditPreset}
+                    onValueChange={(v) => upd("creditPreset", v)}
+                    disabled={isRunning || isPaused}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Nenhum preset" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Nenhum preset</SelectItem>
+                      {creditPresetOptions.map((preset) => (
+                        <SelectItem key={preset.key} value={preset.key}>
+                          {preset.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {config.creditPreset !== "__none__" ? (
+                    <p className="text-[10px] text-muted-foreground">
+                      {creditPresetOptions.find((preset) => preset.key === config.creditPreset)?.description}
+                    </p>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -1585,7 +1860,7 @@ export function PipelineTab() {
             <span className="text-xs font-medium text-muted-foreground">
               {["done", "paused", "aborted"].includes(phase)
                 ? `Resultados ${currentStart}-${currentEnd} de ${resultTotal || rowCount || rows.length} processos`
-                : `Prévia — últimos ${previewRows.length} de ${rowCount || rows.length} processos`}
+                : `Prévia ao vivo ${currentStart}-${currentEnd} de ${previewRows.length} processos carregados`}
               {pipelineState.datajudGrandTotal > (rowCount || rows.length) && !["done", "paused", "aborted"].includes(phase) && (
                 <span className="ml-1 text-muted-foreground/60">
                   ({pipelineState.datajudGrandTotal.toLocaleString("pt-BR")} total no índice)
@@ -1616,7 +1891,7 @@ export function PipelineTab() {
                   <Input
                     value={resultQuery}
                     onChange={(e) => setResultQuery(e.target.value)}
-                    placeholder="Número, parte, advogado, classe, órgão, assunto..."
+                    placeholder="Número, parte, advogado, classe, órgão, assunto ou texto extraído do documento..."
                     className="h-8 text-xs"
                   />
                 </div>
@@ -1643,7 +1918,7 @@ export function PipelineTab() {
               </div>
               <div className="flex items-center justify-between mt-3">
                 <span className="text-[10px] text-muted-foreground">
-                  Página com {previewRows.length} itens carregados; a exportação continua levando todos os resultados do job.
+                  Página de {RESULTS_PAGE_SIZE} itens; a exportação continua levando todos os resultados do job.
                 </span>
                 <div className="flex items-center gap-2">
                   <Button
@@ -1664,6 +1939,38 @@ export function PipelineTab() {
                     className="h-7 text-xs"
                     onClick={() => setResultOffset((prev) => prev + RESULTS_PAGE_SIZE)}
                     disabled={resultsLoading || resultOffset + previewRows.length >= resultTotal}
+                  >
+                    Próxima
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+          {!["done", "paused", "aborted"].includes(phase) && previewRows.length > RESULTS_PAGE_SIZE && (
+            <div className="px-3 py-3 border-b border-border bg-card">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] text-muted-foreground">
+                  Buffer ao vivo com até {PREVIEW_BUFFER_SIZE} processos; paginação local de {RESULTS_PAGE_SIZE} em {RESULTS_PAGE_SIZE}.
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setPreviewOffset((prev) => Math.max(0, prev - RESULTS_PAGE_SIZE))}
+                    disabled={previewOffset === 0}
+                  >
+                    Anterior
+                  </Button>
+                  <span className="text-[10px] text-muted-foreground min-w-[88px] text-center">
+                    {currentStart}-{currentEnd} / {previewRows.length}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setPreviewOffset((prev) => Math.min(previewMaxOffset, prev + RESULTS_PAGE_SIZE))}
+                    disabled={previewOffset >= previewMaxOffset}
                   >
                     Próxima
                   </Button>
@@ -1716,7 +2023,7 @@ export function PipelineTab() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50">
-                {previewRows.map((row) => (
+                {tableRows.map((row) => (
                   <ResultRow
                     key={row.id}
                     row={row}

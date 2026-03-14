@@ -33,6 +33,7 @@ from fastapi import FastAPI, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import asdict
 from trf1_client import TRF1Client, TRF1SearchTooBroadError, formatar_numero_processo
+from pipeline_store import load_pipeline_jobs, save_pipeline_job
 
 app = FastAPI()
 app.add_middleware(
@@ -91,6 +92,33 @@ TRIBUNAL_OPTIONS = [
 ]
 
 TRIBUNAL_BY_ALIAS = {t["alias"]: t["label"] for t in TRIBUNAL_OPTIONS}
+
+CREDIT_PRESET_CONFIGS: dict[str, dict[str, Any]] = {
+    "precatorio_pendente": {
+        "label": "Precatório pendente",
+        "description": (
+            "Busca processos com assunto de precatório e indício de expedição, "
+            "excluindo sinais estruturados de pagamento ou levantamento."
+        ),
+        "default_grau": "G1",
+        "subject_codes": [10672, 13506],
+        "positive_movement_codes": [12457, 15247, 12165],
+        "negative_movement_codes": [12447, 1049, 12449, 12548],
+        "related_classes": [12078, 15215, 156, 157],
+    },
+    "rpv_pendente": {
+        "label": "RPV pendente",
+        "description": (
+            "Busca processos com assunto de RPV e indício de expedição, "
+            "excluindo sinais estruturados de pagamento ou levantamento."
+        ),
+        "default_grau": "G1",
+        "subject_codes": [10673, 14842],
+        "positive_movement_codes": [12457, 15248, 12165],
+        "negative_movement_codes": [12447, 1049, 12449, 12548],
+        "related_classes": [12078, 15215, 156, 157],
+    },
+}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -233,6 +261,45 @@ def _safe_int(value: Any) -> int | None:
         return int(text)
     except Exception:
         return None
+
+
+def _apply_credit_preset_filters(
+    preset_key: str,
+    *,
+    must: list[dict[str, Any]],
+    must_not: list[dict[str, Any]],
+    default_target: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    preset = CREDIT_PRESET_CONFIGS.get((preset_key or "").strip())
+    if not preset:
+        return None
+
+    must.append(
+        {
+            "bool": {
+                "should": [{"match": {"assuntos.codigo": code}} for code in preset["subject_codes"]],
+                "minimum_should_match": 1,
+            }
+        }
+    )
+    must.append(
+        {
+            "bool": {
+                "should": [
+                    {"match": {"movimentos.codigo": code}}
+                    for code in preset["positive_movement_codes"]
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    )
+    for code in preset["negative_movement_codes"]:
+        must_not.append({"match": {"movimentos.codigo": code}})
+
+    if default_target is not None and not str(default_target.get("grau") or "").strip():
+        default_target["grau"] = preset.get("default_grau", "")
+
+    return preset
 
 
 def _numero_processo_clauses(raw_numero: str) -> list[dict]:
@@ -404,6 +471,26 @@ def datajud_tribunais():
     return {"success": True, "data": TRIBUNAL_OPTIONS}
 
 
+@app.get("/api/datajud/presets")
+def datajud_credit_presets():
+    return {
+        "success": True,
+        "data": [
+            {
+                "key": key,
+                "label": preset["label"],
+                "description": preset["description"],
+                "default_grau": preset["default_grau"],
+                "subject_codes": preset["subject_codes"],
+                "positive_movement_codes": preset["positive_movement_codes"],
+                "negative_movement_codes": preset["negative_movement_codes"],
+                "related_classes": preset["related_classes"],
+            }
+            for key, preset in CREDIT_PRESET_CONFIGS.items()
+        ],
+    }
+
+
 @app.post("/api/datajud/buscar")
 def datajud_buscar(payload: dict = Body(...)):
     """
@@ -417,6 +504,7 @@ def datajud_buscar(payload: dict = Body(...)):
       assuntos_excluir_codigos?: int[], # excluir assuntos
       movimento_codigo?: int,           # filtrar por movimentação
       orgao_julgador_codigo?: int,
+      credit_preset?: string,           # precatorio_pendente | rpv_pendente
       grau?: string,
       sistema_codigo?: int,
       formato_codigo?: int,
@@ -475,6 +563,13 @@ def datajud_buscar(payload: dict = Body(...)):
             code_int = _safe_int(code)
             if code_int is not None:
                 must_not.append({"term": {"assuntos.codigo": code_int}})
+
+        _apply_credit_preset_filters(
+            str(payload.get("credit_preset") or ""),
+            must=must,
+            must_not=must_not,
+            default_target=payload,
+        )
 
         # Movimentação
         movimento_codigo = _safe_int(payload.get("movimento_codigo"))
@@ -997,37 +1092,16 @@ def trf1_publico_buscar(
 # Pipeline server-side (background jobs)
 # ═══════════════════════════════════════════════════════════════
 
-jobs: dict[str, dict] = {}  # job_id -> job state
+jobs: dict[str, dict] = load_pipeline_jobs()
 
-# ── Persistent job state (survives server restarts) ──────────────────────────
-import json as _json
-import atexit as _atexit
-JOBS_FILE = "/tmp/pipeline_jobs.json"
 
-def _load_jobs() -> None:
-    """Load completed/done jobs from disk on startup."""
+def _persist_job(job: dict[str, Any] | None) -> None:
+    if not job:
+        return
     try:
-        if os.path.exists(JOBS_FILE):
-            with open(JOBS_FILE) as f:
-                saved = _json.load(f)
-            for jid, jdata in saved.items():
-                # Only restore done/error jobs (running ones are dead)
-                if jdata.get("status") in ("done", "error", "stopped"):
-                    jobs[jid] = jdata
-    except Exception:
-        pass
-
-def _save_jobs() -> None:
-    """Persist finished jobs to disk."""
-    try:
-        to_save = {jid: j for jid, j in jobs.items() if j.get("status") in ("done", "error", "stopped")}
-        with open(JOBS_FILE, "w") as f:
-            _json.dump(to_save, f, default=str)
-    except Exception:
-        pass
-
-_load_jobs()
-_atexit.register(_save_jobs)
+        save_pipeline_job(job)
+    except Exception as exc:
+        logger.warning("Falha ao persistir job %s: %s", job.get("id"), exc)
 
 
 def _active_passive_names(partes: list[dict[str, Any]]) -> tuple[str, str]:
@@ -1341,6 +1415,13 @@ def _run_pipeline(job_id: str) -> None:
             if code_int is not None:
                 must_not.append({"term": {"assuntos.codigo": code_int}})
 
+        _apply_credit_preset_filters(
+            str(config.get("credit_preset") or ""),
+            must=must,
+            must_not=must_not,
+            default_target=config,
+        )
+
         movimento_codigo = _safe_int(config.get("movimento_codigo"))
         if movimento_codigo is not None:
             must.append({"term": {"movimentos.codigo": movimento_codigo}})
@@ -1348,6 +1429,14 @@ def _run_pipeline(job_id: str) -> None:
         orgao_julgador_codigo = _safe_int(config.get("orgao_julgador_codigo"))
         if orgao_julgador_codigo is not None:
             must.append({"term": {"orgaoJulgador.codigo": orgao_julgador_codigo}})
+
+        sistema_codigo = _safe_int(config.get("sistema_codigo"))
+        if sistema_codigo is not None:
+            must.append({"term": {"sistema.codigo": sistema_codigo}})
+
+        formato_codigo = _safe_int(config.get("formato_codigo"))
+        if formato_codigo is not None:
+            must.append({"term": {"formato.codigo": formato_codigo}})
 
         grau = (config.get("grau") or "").strip()
         if grau and grau.lower() != "all" and grau != "__all__":
@@ -1499,6 +1588,7 @@ def _run_pipeline(job_id: str) -> None:
             if not next_sa or len(processos) < page_size:
                 break
             search_after = next_sa
+            _persist_job(job)
 
         if job["status"] == "stopped":
             return
@@ -1566,6 +1656,8 @@ def _run_pipeline(job_id: str) -> None:
                     job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
 
                 job["progress"]["enriched_processual"] = index
+                if index == 1 or index % 5 == 0 or index == len(collected_rows):
+                    _persist_job(job)
 
             job["processual_process_rows"] = processual_process_rows
             job["processual_party_rows"] = processual_party_rows
@@ -1577,6 +1669,7 @@ def _run_pipeline(job_id: str) -> None:
             job["processual_not_found_rows"] = processual_not_found_rows
             job["progress"]["not_found_count"] = len(processual_not_found_rows)
             job["progress"]["error_details"] = processual_errors[:20]
+            _persist_job(job)
 
         if job["status"] == "stopped":
             return
@@ -1663,6 +1756,8 @@ def _run_pipeline(job_id: str) -> None:
                         job["progress"]["errors"] = job["progress"].get("errors", 0) + 1
 
                     job["progress"]["enriched_publico"] = i + 1
+                    if (i + 1) == 1 or (i + 1) % 3 == 0 or (i + 1) == len(collected_rows):
+                        _persist_job(job)
                     if (i + 1) % batch_size == 0:
                         time.sleep(0.5)
 
@@ -1672,16 +1767,17 @@ def _run_pipeline(job_id: str) -> None:
                 job["official_event_rows"] = public_event_rows
                 job["official_document_rows"] = public_document_rows
                 job["official_not_found_rows"] = public_not_found_rows
+                _persist_job(job)
 
         job["status"] = "done"
         job["progress"]["stage"] = "done"
-        _save_jobs()
+        _persist_job(job)
 
     except Exception as e:
         logger.error("Pipeline %s crashed: %s\n%s", job_id, e, traceback.format_exc())
         job["status"] = "error"
         job["error"] = str(e)
-        _save_jobs()
+        _persist_job(job)
 
 
 @app.post("/api/pipeline/start")
@@ -1721,6 +1817,7 @@ def pipeline_start(payload: dict = Body(...)):
         "official_not_found_rows": [],
         "error": None,
     }
+    _persist_job(jobs[job_id])
     t = threading.Thread(target=_run_pipeline, args=(job_id,), daemon=True)
     t.start()
     return {"success": True, "job_id": job_id}
@@ -1736,9 +1833,10 @@ def pipeline_status(job_id: str):
         "success": True,
         "data": {
             "status": job["status"],
+            "config": job.get("config", {}),
             "progress": job["progress"],
             "row_count": len(job["rows"]),
-            "preview_rows": job["rows"][-20:] if job["rows"] else [],
+            "preview_rows": job["rows"][-100:] if job["rows"] else [],
             "error": job.get("error"),
         }
     }
@@ -1873,6 +1971,7 @@ def pipeline_control(job_id: str, payload: dict = Body(...)):
         job["status"] = "running"
     elif action == "stop":
         job["status"] = "stopped"
+    _persist_job(job)
     return {"success": True}
 
 
@@ -1987,6 +2086,10 @@ def pipeline_list_jobs():
                 "created_at": j["created_at"],
                 "collected": j["progress"]["collected"],
                 "total": j["progress"]["total_datajud"],
+                "tribunal": j.get("config", {}).get("tribunal_alias", "api_publica_trf1"),
+                "numero_processo": j.get("config", {}).get("numero_processo", ""),
+                "enrich_processual": bool(j.get("config", {}).get("enrich_processual")),
+                "enrich_publico": bool(j.get("config", {}).get("enrich_publico")),
             }
             for j in sorted(jobs.values(), key=lambda x: x["created_at"], reverse=True)[:10]
         ],

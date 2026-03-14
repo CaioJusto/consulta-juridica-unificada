@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { registerAuth } from "./auth";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -7,6 +8,8 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   const PYTHON_API = process.env.PYTHON_API_URL || "http://127.0.0.1:8000";
+
+  registerAuth(app);
 
   // Health check — verifies Python backend is alive
   app.get("/health", async (_req, res) => {

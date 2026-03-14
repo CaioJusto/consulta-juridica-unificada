@@ -120,6 +120,18 @@ interface SgtOption {
   nome: string;
 }
 
+interface FilterOption {
+  codigo: string;
+  nome: string;
+}
+
+interface CreditPresetOption {
+  key: string;
+  label: string;
+  description: string;
+  default_grau: string;
+}
+
 // ─── SGT Search Hook ────────────────────────────────────────────
 
 function useSgtSearch(kind: string) {
@@ -228,6 +240,9 @@ export function ConsultaGeral() {
   const [movimentoNome, setMovimentoNome] = useState("");
   const [orgaoJulgadorCodigo, setOrgaoJulgadorCodigo] = useState("");
   const [orgaoJulgadorNome, setOrgaoJulgadorNome] = useState("");
+  const [sistemaCodigo, setSistemaCodigo] = useState("__all__");
+  const [formatoCodigo, setFormatoCodigo] = useState("__all__");
+  const [creditPreset, setCreditPreset] = useState("__none__");
   const [dataInicio, setDataInicio] = useState("");
   const [dataFim, setDataFim] = useState("");
   const [dataAtualizacaoInicio, setDataAtualizacaoInicio] = useState("");
@@ -258,6 +273,9 @@ export function ConsultaGeral() {
   const assuntoSgt = useSgtSearch("assunto");
   const movimentoSgt = useSgtSearch("movimento");
   const [assuntoExcluirSgt, setAssuntoExcluirSgt] = useState({ query: "", results: [] as SgtOption[], loading: false });
+  const [sistemaOptions, setSistemaOptions] = useState<FilterOption[]>([]);
+  const [formatoOptions, setFormatoOptions] = useState<FilterOption[]>([]);
+  const [creditPresetOptions, setCreditPresetOptions] = useState<CreditPresetOption[]>([]);
 
   // Orgao julgador search
   const [orgaoQuery, setOrgaoQuery] = useState("");
@@ -318,6 +336,23 @@ export function ConsultaGeral() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      apiRequest("GET", `/api/datajud/filter-options?tribunal=${tribunal}&kind=sistema`).then((r) => r.json()).catch(() => ({ success: false })),
+      apiRequest("GET", `/api/datajud/filter-options?tribunal=${tribunal}&kind=formato`).then((r) => r.json()).catch(() => ({ success: false })),
+      apiRequest("GET", "/api/datajud/presets").then((r) => r.json()).catch(() => ({ success: false })),
+    ]).then(([sistemas, formatos, presets]) => {
+      if (cancelled) return;
+      setSistemaOptions(sistemas.success ? (sistemas.data || []) : []);
+      setFormatoOptions(formatos.success ? (formatos.data || []) : []);
+      setCreditPresetOptions(presets.success ? (presets.data || []) : []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tribunal]);
+
   const buildSearchBody = useCallback((searchAfterCursor?: any[] | null) => {
     const body: any = {
       tribunal_alias: tribunal,
@@ -333,6 +368,9 @@ export function ConsultaGeral() {
     if (movimentoCodigo) body.movimento_codigo = parseInt(movimentoCodigo);
     if (orgaoJulgadorCodigo) body.orgao_julgador_codigo = parseInt(orgaoJulgadorCodigo);
     if (grau && grau !== "all") body.grau = grau;
+    if (sistemaCodigo !== "__all__") body.sistema_codigo = parseInt(sistemaCodigo);
+    if (formatoCodigo !== "__all__") body.formato_codigo = parseInt(formatoCodigo);
+    if (creditPreset !== "__none__") body.credit_preset = creditPreset;
     if (dataInicio) body.data_ajuizamento_inicio = dataInicio;
     if (dataFim) body.data_ajuizamento_fim = dataFim;
     if (dataAtualizacaoInicio) body.data_atualizacao_inicio = dataAtualizacaoInicio;
@@ -346,7 +384,7 @@ export function ConsultaGeral() {
     if (maxMovimentos) body.max_movimentos = parseInt(maxMovimentos);
     if (searchAfterCursor) body.search_after = searchAfterCursor;
     return body;
-  }, [tribunal, pageSize, sortField, sortOrder, numero, classeCodigo, assuntosCodigos, assuntoCodigo, assuntosExcluir, movimentoCodigo, orgaoJulgadorCodigo, grau, dataInicio, dataFim, dataAtualizacaoInicio, dataAtualizacaoFim, nivelSigilo, temAssuntos, temMovimentos, minMovimentos, maxMovimentos]);
+  }, [tribunal, pageSize, sortField, sortOrder, numero, classeCodigo, assuntosCodigos, assuntoCodigo, assuntosExcluir, movimentoCodigo, orgaoJulgadorCodigo, grau, sistemaCodigo, formatoCodigo, creditPreset, dataInicio, dataFim, dataAtualizacaoInicio, dataAtualizacaoFim, nivelSigilo, temAssuntos, temMovimentos, minMovimentos, maxMovimentos]);
 
   async function executeSearch(searchAfterCursor: any[] | null, page: number, newPageHistory?: (any[] | null)[]) {
     setState((s) => ({ ...s, loading: true, error: "" }));
@@ -592,6 +630,27 @@ export function ConsultaGeral() {
   const totalPages = state.total > 0 ? Math.ceil(state.total / pageSize) : 0;
   const hasNextPage = state.searchAfter !== null && state.currentPage < totalPages;
   const hasPrevPage = state.currentPage > 1;
+  const displayedProcessos = showCollected ? allCollectedProcessos : state.processos;
+  const movementCodeBuckets = new Map<string, { codigo: string; nome: string; total: number }>();
+  for (const processo of displayedProcessos) {
+    for (const movimento of processo.movimentos) {
+      const codigo = String(movimento.codigo || "").trim();
+      if (!codigo) continue;
+      const existing = movementCodeBuckets.get(codigo);
+      if (existing) {
+        existing.total += 1;
+      } else {
+        movementCodeBuckets.set(codigo, {
+          codigo,
+          nome: movimento.nome,
+          total: 1,
+        });
+      }
+    }
+  }
+  const availableMovementCodes = Array.from(movementCodeBuckets.values())
+    .sort((a, b) => b.total - a.total || a.codigo.localeCompare(b.codigo))
+    .slice(0, 18);
 
   // ─── Search + Results view ────────────────────────────────────
 
@@ -834,6 +893,67 @@ export function ConsultaGeral() {
               </div>
             </div>
 
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                <Zap className="w-3 h-3" /> Sistema · Formato · Preset
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Sistema processual</Label>
+                  <Select value={sistemaCodigo} onValueChange={setSistemaCodigo}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Qualquer sistema" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">Qualquer sistema</SelectItem>
+                      {sistemaOptions.map((item) => (
+                        <SelectItem key={item.codigo} value={String(item.codigo)}>
+                          {item.nome} ({item.codigo})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Formato</Label>
+                  <Select value={formatoCodigo} onValueChange={setFormatoCodigo}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Qualquer formato" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">Qualquer formato</SelectItem>
+                      {formatoOptions.map((item) => (
+                        <SelectItem key={item.codigo} value={String(item.codigo)}>
+                          {item.nome} ({item.codigo})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">Preset de crédito</Label>
+                  <Select value={creditPreset} onValueChange={setCreditPreset}>
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="Nenhum preset" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Nenhum preset</SelectItem>
+                      {creditPresetOptions.map((preset) => (
+                        <SelectItem key={preset.key} value={preset.key}>
+                          {preset.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {creditPreset !== "__none__" ? (
+                    <p className="text-[10px] text-muted-foreground leading-relaxed">
+                      {creditPresetOptions.find((preset) => preset.key === creditPreset)?.description}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
             {/* Row 3: Dates */}
             <div className="space-y-3">
               <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
@@ -984,7 +1104,7 @@ export function ConsultaGeral() {
                       <SelectItem value="10">10</SelectItem>
                       <SelectItem value="50">50</SelectItem>
                       <SelectItem value="100">100</SelectItem>
-                      <SelectItem value="all">∞ Todas</SelectItem>
+                      <SelectItem value="all">Buscar todos (∞)</SelectItem>
                     </SelectContent>
                   </Select>
                   <span className="text-[10px] text-muted-foreground">(automático)</span>
@@ -1072,7 +1192,9 @@ export function ConsultaGeral() {
                   data-testid="button-auto-collect"
                 >
                   <Play className="w-3.5 h-3.5" />
-                  Coletar {maxPages === "all" ? "todas as" : maxPages} página{maxPages !== "1" ? "s" : ""}
+                  {maxPages === "all"
+                    ? "Buscar todos os resultados"
+                    : `Coletar ${maxPages} página${maxPages !== "1" ? "s" : ""}`}
                 </Button>
               )}
               {autoCollecting && (
@@ -1128,9 +1250,43 @@ export function ConsultaGeral() {
             </div>
           )}
 
+          {availableMovementCodes.length > 0 && (
+            <div className="mb-4 rounded-lg border border-border bg-card/60 p-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-xs font-medium">Códigos de movimentação encontrados nesta busca</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Clique em um código para preencher o filtro oficial do DataJud e refinar a próxima consulta.
+                  </p>
+                </div>
+                {movimentoCodigo ? (
+                  <Badge variant="secondary" className="text-[10px]">
+                    Filtro atual: {movimentoNome} ({movimentoCodigo})
+                  </Badge>
+                ) : null}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {availableMovementCodes.map((item) => (
+                  <button
+                    key={item.codigo}
+                    type="button"
+                    className="rounded-full border border-border px-2.5 py-1 text-[10px] transition-colors hover:border-primary/40 hover:bg-accent"
+                    onClick={() => {
+                      setMovimentoCodigo(item.codigo);
+                      setMovimentoNome(item.nome);
+                      setShowFilters(true);
+                    }}
+                  >
+                    <span className="font-mono text-muted-foreground">{item.codigo}</span> {item.nome}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Results list */}
           <div className="space-y-2">
-            {(showCollected ? allCollectedProcessos : state.processos).map((p, i) => (
+            {displayedProcessos.map((p, i) => (
               <button
                 key={`${p.numero_processo}-${i}`}
                 onClick={() => handleSelectProcesso(p)}
@@ -1231,6 +1387,9 @@ export function ConsultaGeral() {
     if (movimentoCodigo) count++;
     if (orgaoJulgadorCodigo) count++;
     if (grau && grau !== "all") count++;
+    if (sistemaCodigo !== "__all__") count++;
+    if (formatoCodigo !== "__all__") count++;
+    if (creditPreset !== "__none__") count++;
     if (ufSelect) count++;
     if (dataInicio || dataFim) count++;
     if (dataAtualizacaoInicio || dataAtualizacaoFim) count++;
